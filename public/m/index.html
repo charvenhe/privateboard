@@ -946,6 +946,59 @@
 
   /* helpers */
   .empty { padding: 40px 24px; text-align: center; color: var(--ink-dim); font-size: 14px; }
+
+  /* ─── new-agent v2 · voice source + materials ─── */
+  .na-section { margin-top: 22px; }
+  .na-section-label {
+    font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase;
+    color: var(--ink-mid); margin-bottom: 10px;
+  }
+  .na-section-hint { font-size: 12px; color: var(--ink-dim); margin-top: 8px; line-height: 1.5; }
+  .na-pick {
+    display: flex; align-items: center; gap: 10px;
+    width: 100%; box-sizing: border-box;
+    padding: 14px; background: var(--panel); border: 1px solid var(--rule);
+    border-radius: 12px; cursor: pointer; color: var(--ink);
+    -webkit-tap-highlight-color: transparent;
+  }
+  .na-pick:active { background: var(--panel-2); }
+  .na-pick-icon { font-size: 18px; line-height: 1; color: var(--gold); flex: 0 0 auto; }
+  .na-pick-text { font-size: 14px; color: var(--ink-mid); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .na-voice-chosen {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    margin-top: 10px; padding: 10px 12px;
+    background: rgba(196,169,106,0.08); border: 1px solid rgba(196,169,106,0.2);
+    border-radius: 10px;
+  }
+  .na-voice-chosen-name {
+    font-size: 14px; color: var(--gold-soft);
+    flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .na-voice-chosen-tag { font-size: 12px; color: var(--ink-mid); flex: 0 0 auto; }
+  .na-voice-remove {
+    flex: 0 0 auto; width: 24px; height: 24px; border-radius: 6px;
+    background: transparent; color: var(--ink-mid); font-size: 14px; line-height: 1;
+  }
+  .na-voice-remove:active { background: var(--rule); }
+  .na-chips {
+    display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px;
+  }
+  .na-chips:empty { margin-top: 0; }
+  .na-chip {
+    display: inline-flex; align-items: center; gap: 8px;
+    max-width: 100%; box-sizing: border-box;
+    padding: 8px 10px; background: var(--panel-2); border: 1px solid var(--rule);
+    border-radius: 10px; font-size: 14px; color: var(--ink);
+  }
+  .na-chip.is-uploading { opacity: 0.6; }
+  .na-chip-icon { flex: 0 0 auto; font-size: 14px; line-height: 1; color: var(--gold); }
+  .na-chip-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .na-chip-size { flex: 0 0 auto; font-size: 12px; color: var(--ink-dim); }
+  .na-chip-rm {
+    flex: 0 0 auto; width: 20px; height: 20px; border-radius: 5px;
+    background: transparent; color: var(--ink-mid); font-size: 13px; line-height: 1;
+  }
+  .na-chip-rm:active { background: var(--rule); }
 </style>
 </head>
 <body>
@@ -1126,6 +1179,34 @@
 
       <div id="new-agent-url-hint" style="display:none; margin-top:10px; padding:10px 14px; background:rgba(196,169,106,0.08); border:1px solid rgba(196,169,106,0.2); border-radius:10px; color:var(--gold-soft); font-size:12px; align-items:center; gap:8px;">
         🎙 已识别到视频链接 · 将自动用作声音蒸馏源
+      </div>
+
+      <!-- ─── Voice source (local audio/video → clone) ─── -->
+      <div class="na-section" id="na-voice-section">
+        <div class="na-section-label">声音来源 · 本地音视频</div>
+        <label class="na-pick" id="na-voice-pick">
+          <span class="na-pick-icon">🎙</span>
+          <span class="na-pick-text" id="na-voice-pick-text">选择音频或视频，用真人声音克隆</span>
+          <input type="file" id="na-voice-input" accept="audio/*,video/*" hidden>
+        </label>
+        <div class="na-voice-chosen" id="na-voice-chosen" hidden>
+          <span class="na-voice-chosen-name" id="na-voice-chosen-name"></span>
+          <span class="na-voice-chosen-tag">用于克隆声音</span>
+          <button type="button" class="na-voice-remove" id="na-voice-remove" aria-label="移除声音来源">✕</button>
+        </div>
+        <div class="na-section-hint">也可粘贴视频链接到上方描述；本地文件优先。</div>
+      </div>
+
+      <!-- ─── Materials (multi-file persona seed) ─── -->
+      <div class="na-section" id="na-materials-section">
+        <div class="na-section-label">参考材料 · 喂给角色</div>
+        <label class="na-pick" id="na-materials-pick">
+          <span class="na-pick-icon">＋</span>
+          <span class="na-pick-text">添加文本 / PDF / Word / 图片 / 音视频</span>
+          <input type="file" id="na-materials-input" accept=".txt,.md,.pdf,.doc,.docx,text/*,image/*,audio/*,video/*" multiple hidden>
+        </label>
+        <div class="na-chips" id="na-materials-chips"></div>
+        <div class="na-section-hint">这些材料只用于一次性塑造角色，不会长期保存。</div>
       </div>
 
       <div id="new-agent-error" style="display:none; margin-top:10px; padding:10px 14px; background:rgba(220,80,80,0.12); border:1px solid rgba(220,80,80,0.3); border-radius:10px; color:#FF8B7E; font-size:12px;"></div>
@@ -1561,7 +1642,7 @@ function goto(screen) {
   if (tabMap[screen]) {
     $$('.tabbar .tab').forEach(b => b.classList.toggle('on', b.dataset.tab === tabMap[screen]));
   }
-  if (screen === 'new-agent') restoreAgentDraft();
+  if (screen === 'new-agent') { restoreAgentDraft(); wireNaExtras(); renderNaMaterials(); renderNaVoiceSource(); }
   requestAnimationFrame(syncBottomChromeHeights);
   window.scrollTo(0, 0);
   persistMobileView(screen);
@@ -5303,6 +5384,151 @@ function onNewAgentDescInput(value) {
   hint.style.display = VOICE_URL_RE.test(String(value || '')) ? 'flex' : 'none';
 }
 
+// ── new agent v2 · materials + local voice source ─────────
+// In-memory only (a one-time persona seed, never persisted as a draft).
+// `naMaterials` holds the upload descriptors {id,kind,filePath,name,mime,size}
+// returned by POST /api/agents/materials/upload. `naVoiceSource` holds the
+// descriptor of the audio/video chosen specifically as the voice-clone
+// source; it is ALSO merged into the materials list (deduped by filePath) on
+// submit so the server can transcribe it as seed material.
+let naMaterials = [];
+let naVoiceSource = null;
+
+const NA_KIND_ICON = { text: '▤', doc: '▦', image: '◧', audio: '🎙', video: '▷' };
+function naFmtBytes(n) {
+  const b = Number(n) || 0;
+  if (b < 1024) return b + ' B';
+  if (b < 1024 * 1024) return (b / 1024).toFixed(0) + ' KB';
+  return (b / (1024 * 1024)).toFixed(1) + ' MB';
+}
+// Best-effort client-side kind guess for the optimistic chip shown while the
+// upload is in flight. The server's returned descriptor.kind is authoritative
+// and replaces this once the request resolves.
+function naGuessKind(file) {
+  const t = String(file.type || '');
+  const name = String(file.name || '').toLowerCase();
+  if (t.startsWith('image/')) return 'image';
+  if (t.startsWith('audio/')) return 'audio';
+  if (t.startsWith('video/')) return 'video';
+  if (/\.(pdf|docx?|rtf)$/.test(name) || t === 'application/pdf') return 'doc';
+  return 'text';
+}
+// Upload one file to the materials endpoint; returns the first descriptor.
+async function naUploadMaterial(file) {
+  const fd = new FormData();
+  fd.append('file', file, file.name);
+  const res = await fetch('/api/agents/materials/upload', { method: 'POST', body: fd });
+  if (!res.ok) {
+    let msg = 'HTTP ' + res.status;
+    try { const j = await res.json(); if (j && j.error) msg = j.error; } catch {}
+    throw new Error(msg);
+  }
+  const json = await res.json();
+  const list = (json && Array.isArray(json.materials)) ? json.materials : [];
+  if (!list.length) throw new Error('上传无返回');
+  return list[0];
+}
+function renderNaMaterials() {
+  const wrap = document.getElementById('na-materials-chips');
+  if (!wrap) return;
+  wrap.innerHTML = naMaterials.map((m) => {
+    const icon = NA_KIND_ICON[m.kind] || '▤';
+    const uploading = m.pending ? ' is-uploading' : '';
+    const size = (typeof m.size === 'number' && m.size > 0) ? `<span class="na-chip-size">${naFmtBytes(m.size)}</span>` : '';
+    const rm = m.pending ? '' : `<button type="button" class="na-chip-rm" data-na-mat-rm="${escapeHtml(m._key)}" aria-label="移除">✕</button>`;
+    return `<span class="na-chip${uploading}">
+      <span class="na-chip-icon">${icon}</span>
+      <span class="na-chip-name">${escapeHtml(m.name || '文件')}</span>
+      ${size}${rm}
+    </span>`;
+  }).join('');
+  wrap.querySelectorAll('[data-na-mat-rm]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const key = btn.getAttribute('data-na-mat-rm');
+      naMaterials = naMaterials.filter((m) => m._key !== key);
+      renderNaMaterials();
+    });
+  });
+}
+function renderNaVoiceSource() {
+  const chosen = document.getElementById('na-voice-chosen');
+  const pick = document.getElementById('na-voice-pick');
+  const nameEl = document.getElementById('na-voice-chosen-name');
+  const pickText = document.getElementById('na-voice-pick-text');
+  if (!chosen || !pick) return;
+  if (naVoiceSource) {
+    chosen.hidden = false;
+    pick.style.display = 'none';
+    if (nameEl) nameEl.textContent = naVoiceSource.pending ? (naVoiceSource.name + ' · 上传中…') : naVoiceSource.name;
+  } else {
+    chosen.hidden = true;
+    pick.style.display = '';
+    if (pickText) pickText.textContent = '选择音频或视频，用真人声音克隆';
+  }
+}
+function resetNaExtras() {
+  naMaterials = [];
+  naVoiceSource = null;
+  const vi = document.getElementById('na-voice-input');
+  const mi = document.getElementById('na-materials-input');
+  if (vi) vi.value = '';
+  if (mi) mi.value = '';
+  renderNaMaterials();
+  renderNaVoiceSource();
+}
+function wireNaExtras() {
+  const voiceInput = document.getElementById('na-voice-input');
+  const matInput = document.getElementById('na-materials-input');
+  const voiceRemove = document.getElementById('na-voice-remove');
+  const err = document.getElementById('new-agent-error');
+  const showErr = (m) => { if (err) { err.textContent = m; err.style.display = 'block'; } };
+
+  if (voiceInput && !voiceInput.dataset.wired) {
+    voiceInput.dataset.wired = '1';
+    voiceInput.addEventListener('change', async () => {
+      const f = voiceInput.files && voiceInput.files[0];
+      voiceInput.value = '';
+      if (!f) return;
+      naVoiceSource = { name: f.name, mime: f.type, size: f.size, pending: true };
+      renderNaVoiceSource();
+      try {
+        const desc = await naUploadMaterial(f);
+        naVoiceSource = { ...desc, pending: false };
+      } catch (e) {
+        naVoiceSource = null;
+        showErr('声音文件上传失败：' + e.message);
+      }
+      renderNaVoiceSource();
+    });
+  }
+  if (voiceRemove && !voiceRemove.dataset.wired) {
+    voiceRemove.dataset.wired = '1';
+    voiceRemove.addEventListener('click', () => { naVoiceSource = null; renderNaVoiceSource(); });
+  }
+  if (matInput && !matInput.dataset.wired) {
+    matInput.dataset.wired = '1';
+    matInput.addEventListener('change', async () => {
+      const files = Array.from(matInput.files || []);
+      matInput.value = '';
+      for (const f of files) {
+        const key = 'm' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+        const placeholder = { _key: key, name: f.name, mime: f.type, size: f.size, kind: naGuessKind(f), pending: true };
+        naMaterials.push(placeholder);
+        renderNaMaterials();
+        try {
+          const desc = await naUploadMaterial(f);
+          const idx = naMaterials.findIndex((m) => m._key === key);
+          if (idx >= 0) naMaterials[idx] = { ...desc, _key: key, pending: false };
+        } catch (e) {
+          naMaterials = naMaterials.filter((m) => m._key !== key);
+          showErr('材料上传失败（' + f.name + '）：' + e.message);
+        }
+        renderNaMaterials();
+      }
+    });
+  }
+}
+
 async function submitNewAgent() {
   const ta = document.getElementById('new-agent-desc');
   const raw = String(ta?.value || '').trim();
@@ -5315,22 +5541,46 @@ async function submitNewAgent() {
     if (err) { err.textContent = '描述太短，多写几句'; err.style.display = 'block'; }
     return;
   }
+  // Block submit while any upload is still in flight so we don't send a
+  // half-formed descriptor list (missing filePath) to the backend.
+  if (naVoiceSource && naVoiceSource.pending) {
+    if (err) { err.textContent = '声音文件还在上传，请稍候'; err.style.display = 'block'; }
+    return;
+  }
+  if (naMaterials.some((m) => m.pending)) {
+    if (err) { err.textContent = '材料还在上传，请稍候'; err.style.display = 'block'; }
+    return;
+  }
   const urlMatch = raw.match(VOICE_URL_RE);
   const description = raw.replace(/https?:\/\/\S+/g, '').replace(/\s+/g, ' ').trim();
   const btn = document.getElementById('new-agent-submit');
   if (btn) { btn.textContent = '启动中...'; btn.disabled = true; btn.style.opacity = '0.5'; }
   try {
+    // Assemble the materials list · strip client-only bookkeeping fields
+    // (_key, pending) so only the backend descriptor shape goes over the
+    // wire. A local voice source is folded into materials too (deduped by
+    // filePath) so the server can transcribe it as persona seed material.
+    const toDescriptor = (m) => ({ id: m.id, kind: m.kind, filePath: m.filePath, name: m.name, mime: m.mime, size: m.size });
+    const materials = naMaterials.filter((m) => !m.pending && m.filePath).map(toDescriptor);
+    if (naVoiceSource && naVoiceSource.filePath && !materials.some((m) => m.filePath === naVoiceSource.filePath)) {
+      materials.push(toDescriptor(naVoiceSource));
+    }
     // Shared start-payload builder · only attaches voiceSourceUrl when a video
-    // link was actually extracted (matches PC).
+    // link was actually extracted (matches PC). A local file in naVoiceSource
+    // takes priority — both can be present and the backend chooses the local
+    // file when voiceSource is supplied.
     const payload = window.AgentRuntime.buildPersonaStartPayload(description, {
       locale: 'zh',
       voiceSourceUrl: urlMatch ? urlMatch[0] : '',
+      materials,
+      voiceSource: (naVoiceSource && naVoiceSource.filePath) ? { filePath: naVoiceSource.filePath } : null,
     });
     const data = await agentApi.generatePersona(payload);
     appState.activeBuildJobId = data.jobId || data.id;
     // Build kicked off successfully · the draft is now committed, clear it.
     clearAgentDraft();
     if (ta) ta.value = '';
+    resetNaExtras();
     goto('build-progress');
     subscribeBuildStream(appState.activeBuildJobId);
   } catch (e) {
