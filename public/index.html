@@ -12322,6 +12322,109 @@
      accent gradient. The avatar tile on the left is the ONLY
      decorative element — but it's content, not chrome (the 8-bit
      portrait is the identity signal). */
+  /* ─── new-agent v2 · local voice source + persona materials ─── */
+  .ag-extras {
+    margin-top: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+  .ag-extra { min-width: 0; }
+  .ag-extra-label {
+    font-size: 12px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-soft);
+    margin-bottom: 8px;
+  }
+  .ag-extra-hint {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-top: 8px;
+    line-height: 1.5;
+  }
+  .ag-pick {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    box-sizing: border-box;
+    padding: 12px 14px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    cursor: pointer;
+    color: var(--text);
+    transition: border-color 0.18s ease, background 0.18s ease;
+  }
+  .ag-pick:hover { border-color: var(--lime); }
+  .ag-pick-icon { font-size: 16px; line-height: 1; color: var(--lime); flex: 0 0 auto; }
+  .ag-pick-text {
+    font-size: 14px;
+    color: var(--text-soft);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ag-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .ag-chips:empty { margin-top: 0; }
+  .ag-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 100%;
+    box-sizing: border-box;
+    padding: 7px 10px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    font-size: 14px;
+    color: var(--text);
+  }
+  /* The audio/video chip currently chosen as the voice-clone source. */
+  .ag-chip.is-voice { border-color: rgba(201, 164, 107, 0.55); background: rgba(201, 164, 107, 0.10); }
+  .ag-chip.is-uploading { opacity: 0.55; }
+  .ag-chip-icon { flex: 0 0 auto; font-size: 14px; line-height: 1; color: var(--lime); }
+  .ag-chip-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ag-chip-size { flex: 0 0 auto; font-size: 12px; color: var(--text-dim); }
+  /* 🎙 toggle · only on audio/video chips; picks which file clones the voice. */
+  .ag-chip-voice {
+    flex: 0 0 auto;
+    height: 22px;
+    padding: 0 6px;
+    border-radius: 5px;
+    line-height: 1;
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--text-dim);
+    font-size: 12px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+  }
+  .ag-chip-voice.on { border-color: rgba(201, 164, 107, 0.7); color: var(--lime); background: rgba(201, 164, 107, 0.12); }
+  .ag-chip-voice:hover { background: rgba(255,255,255,0.06); }
+  .ag-chip-rm {
+    flex: 0 0 auto;
+    width: 20px;
+    height: 20px;
+    border-radius: 4px;
+    background: transparent;
+    border: none;
+    color: var(--text-soft);
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .ag-chip-rm:hover { background: rgba(255,255,255,0.06); color: var(--text); }
+
   .cmp-celeb-stack {
     margin-top: 32px;
   }

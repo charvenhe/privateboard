@@ -72,6 +72,11 @@ const MIN_TRANSCRIPT_CHARS_FOR_LLM = 200;
 interface JobState {
   id: string;
   videoUrl: string;
+  /** Local audio / video source · set when the caller uploaded a file
+   *  (New-Agent v2 voice source) instead of pasting a URL. When present
+   *  the download + search phases are skipped and this file feeds the
+   *  pipeline directly (ffmpeg-extracts audio if it's a video). */
+  filePath: string | null;
   celebrity: string;
   agentId: string | null;
   workDir: string;
@@ -86,6 +91,12 @@ export interface StartVoiceDistillOpts {
    *  to find a candidate video for the named celebrity. When present,
    *  the search step is skipped and the URL is downloaded directly. */
   videoUrl?: string;
+  /** Optional · a local audio / video file (New-Agent v2 voice upload).
+   *  When present, BOTH search and download are skipped — the file is
+   *  normalized straight into the clone pipeline (ffmpeg extracts the
+   *  audio track if it's a video container). Takes precedence over
+   *  `videoUrl` when both are somehow supplied. */
+  filePath?: string;
   celebrity: string;
   /** Optional · when present, the agent's voice profile is updated to
    *  use the cloned voice_id on success. */
@@ -96,13 +107,16 @@ export interface StartVoiceDistillOpts {
  *  pipeline runs async and emits progress on `voiceDistillBus`. */
 export function startVoiceDistill(opts: StartVoiceDistillOpts): string {
   const videoUrl = (opts.videoUrl || "").trim();
+  const filePath = (opts.filePath || "").trim() || null;
   const celebrity = opts.celebrity.trim();
   if (!celebrity) throw new Error("celebrity name is required");
 
   const jobId = randomUUID();
   createVoiceDistillJob({
     id: jobId,
-    videoUrl: videoUrl || `auto-search:${celebrity}`,
+    // The DB row's sourceRef · a local file shows as `file:<path>`, a
+    // URL shows verbatim, and an auto-search shows the search seed.
+    videoUrl: filePath ? `file:${filePath}` : videoUrl || `auto-search:${celebrity}`,
     celebrity,
     agentId: opts.agentId ?? null,
   });
@@ -111,6 +125,7 @@ export function startVoiceDistill(opts: StartVoiceDistillOpts): string {
   const state: JobState = {
     id: jobId,
     videoUrl,
+    filePath,
     celebrity,
     agentId: opts.agentId ?? null,
     workDir,
@@ -262,10 +277,18 @@ async function runPipeline(state: JobState): Promise<void> {
   try {
     if (state.controller.signal.aborted) return finalizeAbort(state);
 
-    // ── Phase 1 · search candidate video (when no URL supplied) ─────
+    // ── Phase 1 · search candidate video (when no URL / file supplied) ─
     startPhase(1);
     let resolvedUrl = state.videoUrl;
-    if (!resolvedUrl) {
+    if (state.filePath) {
+      // Local upload · no search, no download. The file IS the raw
+      // source; Phase 3's normalize step demuxes a video container
+      // into clean mono audio, so a video upload works the same as an
+      // audio one.
+      reportProgress(1, "Local file supplied by caller · skipping search + download", 1.0);
+      state.partial.resolvedUrl = `file:${state.filePath}`;
+      updateVoiceDistillJob(state.id, { partial: state.partial });
+    } else if (!resolvedUrl) {
       reportProgress(1, `Searching YouTube for "${state.celebrity}" 演讲 / 访谈 / interview`, 0.1);
       const picked = await pickBestSearchCandidate({
         celebrity: state.celebrity,
@@ -295,16 +318,29 @@ async function runPipeline(state: JobState): Promise<void> {
     endPhase(1);
     if (state.controller.signal.aborted) return finalizeAbort(state);
 
-    // ── Phase 2 · download ─────────────────────────────────────
+    // ── Phase 2 · download (skipped for local-file source) ──────
     startPhase(2);
-    reportProgress(2, `Fetching audio from ${resolvedUrl}`, 0.1);
-    const raw = await downloadAudio({
-      url: resolvedUrl,
-      outputPath: join(state.workDir, "raw.mp3"),
-      signal: state.controller.signal,
-    });
-    state.partial.rawAudioPath = raw.audioPath;
-    state.partial.durationSec = raw.durationSec;
+    let rawAudioPath: string;
+    if (state.filePath) {
+      // Already on disk · point the pipeline straight at the upload.
+      // normalizeAudio (Phase 3) handles re-encode + video→audio
+      // extraction. Duration is unknown here; the silence / clip steps
+      // tolerate a 0 default (durationSec is only used to clamp the
+      // padding window outward).
+      reportProgress(2, "Using uploaded file · no download needed", 1.0);
+      rawAudioPath = state.filePath;
+      state.partial.rawAudioPath = state.filePath;
+    } else {
+      reportProgress(2, `Fetching audio from ${resolvedUrl}`, 0.1);
+      const raw = await downloadAudio({
+        url: resolvedUrl,
+        outputPath: join(state.workDir, "raw.mp3"),
+        signal: state.controller.signal,
+      });
+      rawAudioPath = raw.audioPath;
+      state.partial.rawAudioPath = raw.audioPath;
+      state.partial.durationSec = raw.durationSec;
+    }
     endPhase(2);
     if (state.controller.signal.aborted) return finalizeAbort(state);
 
@@ -312,7 +348,7 @@ async function runPipeline(state: JobState): Promise<void> {
     startPhase(3);
     const normPath = join(state.workDir, "audio.mp3");
     await normalizeAudio({
-      inputPath: raw.audioPath,
+      inputPath: rawAudioPath,
       outputPath: normPath,
       signal: state.controller.signal,
     });

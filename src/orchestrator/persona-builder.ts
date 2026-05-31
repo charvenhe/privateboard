@@ -145,6 +145,16 @@ interface PersonaJobState {
   /** Optional caller-supplied URL for voice cloning. When set, Phase 5
    *  skips YouTube search and pulls audio from this URL directly. */
   voiceSourceUrl?: string;
+  /** Optional caller-supplied LOCAL file for voice cloning (New-Agent
+   *  v2 upload). Takes precedence over `voiceSourceUrl` in Phase 5 ·
+   *  the clone runs straight from this file (ffmpeg extracts audio if
+   *  it's a video). */
+  voiceSourceFilePath?: string;
+  /** Optional consolidated materials context · extracted once at build
+   *  start from the caller's uploads (text / pdf / docx / image notes /
+   *  audio-video transcripts) and fed into the profile passes as
+   *  additional grounding. A one-time seed · never persisted. */
+  materialsContext?: string;
   startedAt: number;
   controller: AbortController;
   promptTokens: number;
@@ -366,6 +376,15 @@ export function startPersonaBuild(opts: {
    *  names where YouTube auto-search would otherwise land on a
    *  same-named entertainer or parody channel. */
   voiceSourceUrl?: string;
+  /** Optional caller-supplied LOCAL file (New-Agent v2 voice upload).
+   *  Takes precedence over `voiceSourceUrl` in Phase 5 · the clone
+   *  runs straight from this file. */
+  voiceSourceFilePath?: string;
+  /** Optional pre-extracted materials context · a one-time grounding
+   *  seed folded into the profile passes (text / pdf / docx / image
+   *  notes / transcripts). The route extracts this via
+   *  `extractMaterials` before calling startPersonaBuild. */
+  materialsContext?: string;
 }): string {
   const description = opts.description.trim();
   const jobId = randomUUID();
@@ -375,6 +394,8 @@ export function startPersonaBuild(opts: {
     description,
     locale: opts.locale ?? "en",
     voiceSourceUrl: opts.voiceSourceUrl,
+    voiceSourceFilePath: opts.voiceSourceFilePath,
+    materialsContext: opts.materialsContext,
     startedAt: Date.now(),
     controller: new AbortController(),
     promptTokens: 0,
@@ -672,14 +693,30 @@ async function runPipeline(state: PersonaJobState): Promise<void> {
     } | null> => {
       if (getActiveVoiceProvider() !== "minimax") return null;
 
-      // Fast path · caller pasted a specific URL on the composer.
-      // Skip the LLM detect + YouTube search entirely. The celebrity
-      // label is still useful for naming the registered MiniMax voice,
-      // so derive a best-effort one from the description (or fall
-      // back to the literal description if no name detected).
+      // Fast path · caller pasted a specific URL OR uploaded a local
+      // audio/video file on the composer. Skip the LLM detect + YouTube
+      // search entirely. The celebrity label is still useful for naming
+      // the registered MiniMax voice, so derive a best-effort one from
+      // the description (or fall back to the literal description if no
+      // name detected).
       let personName: string;
       let cloneJobId: string;
-      if (state.voiceSourceUrl) {
+      if (state.voiceSourceFilePath) {
+        // New-Agent v2 · local upload takes precedence over any URL.
+        const detected = await detectRealPersonReferent(state, partial.profileV2!);
+        personName = detected?.name || state.description.split(/[，,。.]/)[0].trim().slice(0, 40) || "director";
+        reportProgress(5, `cloning voice from uploaded file · ${personName}`, 0.3);
+        personaBus.emit(state.id, {
+          type: "persona-phase-progress",
+          phase: 5,
+          detail: `cloning voice · uploaded file`,
+          progressPct: progressBaselinePct + 1,
+        });
+        cloneJobId = startVoiceDistill({
+          celebrity: personName,
+          filePath: state.voiceSourceFilePath,
+        });
+      } else if (state.voiceSourceUrl) {
         const detected = await detectRealPersonReferent(state, partial.profileV2!);
         personName = detected?.name || state.description.split(/[，,。.]/)[0].trim().slice(0, 40) || "director";
         reportProgress(5, `cloning voice from supplied URL · ${personName}`, 0.3);
@@ -920,12 +957,30 @@ function finalizeFromCheck(state: PersonaJobState, status: "aborted" | "tokens")
 
 /* ─────────── Phase 1 / 3 helper · Stage A profile pass ─────────── */
 
+/** Merge web context + the one-time materials seed into a single
+ *  grounding block for the profile pass. Returns null when both are
+ *  empty so `buildAgentProfileMessages` omits the section entirely. */
+function mergeGrounding(webContext?: string, materialsContext?: string): string | null {
+  const parts: string[] = [];
+  const web = (webContext || "").trim();
+  const mats = (materialsContext || "").trim();
+  if (web) parts.push(web);
+  if (mats) parts.push(`## User-supplied materials\n\n${mats}`);
+  return parts.length > 0 ? parts.join("\n\n") : null;
+}
+
 async function runProfilePass(
   state: PersonaJobState,
   label: string,
   webContext?: string,
 ): Promise<AgentProfile | null> {
-  const messages = buildAgentProfileMessages({ description: state.description, webContext: webContext ?? null });
+  // Fold the one-time materials seed (uploaded notes / docs / image
+  // notes / transcripts) into the profile pass's grounding context. It
+  // rides alongside any web context as an extra labelled block so the
+  // profile generator can ground the persona in the user's own
+  // material. Best-effort · empty when no materials were supplied.
+  const grounding = mergeGrounding(webContext, state.materialsContext);
+  const messages = buildAgentProfileMessages({ description: state.description, webContext: grounding });
   const candidates = flagshipCandidates();
   if (candidates.length === 0) {
     process.stderr.write(`[persona-builder/${label}] no reachable models for the active credential · cannot build profile\n`);
