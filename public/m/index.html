@@ -2378,6 +2378,16 @@ window.addEventListener('resize', () => requestAnimationFrame(layoutBoardroomSea
 // Supported: rooms, room-chat, agents, agent-profile, new-agent,
 // build-progress, briefs, me. Optional `&voice=1` opens the voice
 // overlay on top. Optional `&sheet=new-room` opens the new-room sheet.
+// New-agent v2 module state · declared HERE (before applyDeepLink) on purpose.
+// A `?screen=new-agent` deep-link calls goto('new-agent') synchronously at
+// parse time, and goto() touches these via renderNaMaterials/renderNaVoiceSource;
+// if they were declared further down (their natural home), the `let`/`const`
+// TDZ would throw and abort the rest of the inline script. The render/handler
+// functions are hoisted and close over these bindings.
+let naMaterials = [];
+let naVoiceSource = null;
+const NA_KIND_ICON = { text: '▤', doc: '▦', image: '◧', audio: '🎙', video: '▷' };
+
 (function applyDeepLink() {
   const params = new URLSearchParams(location.search);
   const screen = params.get('screen');
@@ -5394,10 +5404,8 @@ function onNewAgentDescInput(value) {
 // descriptor of the audio/video chosen specifically as the voice-clone
 // source; it is ALSO merged into the materials list (deduped by filePath) on
 // submit so the server can transcribe it as seed material.
-let naMaterials = [];
-let naVoiceSource = null;
-
-const NA_KIND_ICON = { text: '▤', doc: '▦', image: '◧', audio: '🎙', video: '▷' };
+// (`naMaterials` / `naVoiceSource` / `NA_KIND_ICON` are declared earlier,
+// above applyDeepLink, so a parse-time deep-link goto('new-agent') doesn't TDZ.)
 function naFmtBytes(n) {
   const b = Number(n) || 0;
   if (b < 1024) return b + ' B';
