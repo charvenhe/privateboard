@@ -318,6 +318,25 @@ describe("shared voice caption playback", () => {
     expect(vc.currentCaption(q)).toBe("第二句。");
   });
 
+  it("stamps caption endTimes by cumulative byte share of clip duration", () => {
+    const audio = { currentTime: 0, duration: 8, play: () => Promise.resolve() };
+    const vc = new Runtime.VoicePlaybackController({
+      audio,
+      api: { postVoiceProgress: async () => ({}), postVoiceDone: async () => ({}) },
+    });
+    const q = {
+      captions: [
+        { text: "第一句。", bytes: 30, endTime: null },
+        { text: "第二句。", bytes: 10, endTime: null },
+      ],
+      totalCaptionBytes: 40,
+    };
+    vc._fillCaptionTimes(q, audio);
+    // cumulative byte share × duration: (30/40)*8 = 6, (40/40)*8 = 8
+    expect(q.captions[0].endTime).toBe(6);
+    expect(q.captions[1].endTime).toBe(8);
+  });
+
   it("can start live voice from the first audio chunk instead of waiting for final", () => {
     // Early-start before `final` is only safe when MediaSource can stream the mime;
     // stub a usable MediaSource so this exercises the live-streaming path.
