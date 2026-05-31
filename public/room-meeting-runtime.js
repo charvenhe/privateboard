@@ -973,10 +973,19 @@
         this._done(next);
       };
       if (next.parts.length) {
-        if (!this._startMediaSource(next, audio)) {
+        if (this._startMediaSource(next, audio)) {
+          audio.onloadedmetadata = null; // MSE stamps caption endTimes via updateend
+        } else {
           audio.src = this._fallbackAudioSrc(next);
+          // Non-MSE (iOS) has no sourceBuffer updateend to stamp caption
+          // endTimes, so currentCaption() would drift on a byte-ratio estimate
+          // ("first sentence aligns, rest don't"). Once metadata gives the real
+          // duration, distribute it across captions by byte share for accurate
+          // text-follows-audio.
+          audio.onloadedmetadata = () => this._fillCaptionTimes(next, audio);
         }
       } else {
+        audio.onloadedmetadata = null;
         audio.src = "/api/voices/message/" + encode(next.messageId) + "/audio?ts=" + Date.now();
       }
       try {
@@ -1025,6 +1034,21 @@
         } catch (_) { /* fall through to data URI */ }
       }
       return "data:" + (q.mime || "audio/mpeg") + ";base64," + q.parts.join("");
+    }
+
+    /** Stamp each caption's endTime by its byte share of the (now-known) clip
+     *  duration. Used on the non-MSE path where there's no sourceBuffer
+     *  updateend to time captions; without it currentCaption() falls back to a
+     *  drifting byte-ratio estimate that only matches the first caption. */
+    _fillCaptionTimes(q, audio) {
+      const dur = audio && audio.duration;
+      if (!q || !q.captions || !q.captions.length) return;
+      if (!Number.isFinite(dur) || dur <= 0 || !q.totalCaptionBytes) return;
+      let acc = 0;
+      for (const cap of q.captions) {
+        acc += (cap && cap.bytes) ? cap.bytes : 0;
+        if (cap) cap.endTime = (acc / q.totalCaptionBytes) * dur;
+      }
     }
 
     _startMediaSource(q, audio) {
