@@ -319,28 +319,141 @@ describe("shared voice caption playback", () => {
   });
 
   it("can start live voice from the first audio chunk instead of waiting for final", () => {
-    let plays = 0;
+    // Early-start before `final` is only safe when MediaSource can stream the mime;
+    // stub a usable MediaSource so this exercises the live-streaming path.
+    const g = globalThis as Record<string, unknown>;
+    const origMS = g.MediaSource;
+    const origURL = (g.URL as { createObjectURL?: unknown }).createObjectURL;
+    class FakeMediaSource {
+      static isTypeSupported() { return true; }
+      readyState = "closed";
+      addEventListener() {}
+      addSourceBuffer() { return { addEventListener() {}, appendBuffer() {}, updating: false, buffered: { length: 0 } }; }
+      endOfStream() {}
+    }
+    g.MediaSource = FakeMediaSource as unknown;
+    (g.URL as { createObjectURL: () => string }).createObjectURL = () => "blob:fake";
+    try {
+      let plays = 0;
+      const audio = {
+        currentTime: 0,
+        duration: Number.NaN,
+        play: () => { plays += 1; return Promise.resolve(); },
+        set src(_v: string) {},
+        get src() { return ""; },
+      };
+      const vc = new Runtime.VoicePlaybackController({
+        audio,
+        useMediaSource: true,
+        playOnFirstChunk: true,
+        api: { postVoiceProgress: async () => ({}), postVoiceDone: async () => ({}) },
+      });
+      vc.setUnlocked(true);
+      vc.enqueueChunk({
+        roomId: "room-1",
+        messageId: "message-1",
+        audioBase64: "AA==",
+        mimeType: "audio/mpeg",
+        text: "第一段",
+      });
+      expect(vc.playing?.messageId).toBe("message-1");
+      expect(plays).toBe(1);
+    } finally {
+      if (origMS === undefined) delete g.MediaSource; else g.MediaSource = origMS;
+      (g.URL as { createObjectURL?: unknown }).createObjectURL = origURL;
+    }
+  });
+
+  it("does NOT advance before final when MediaSource is unavailable (iOS/high-latency)", () => {
+    // No global.MediaSource here, so the controller falls back to the data: URI path
+    // (the iOS Safari path). Early-starting on the first chunk would truncate the
+    // segment under high latency, so playback must wait for markFinal().
+    expect((globalThis as { MediaSource?: unknown }).MediaSource).toBeUndefined();
+    const srcs: string[] = [];
+    const done: string[] = [];
     const audio = {
       currentTime: 0,
       duration: Number.NaN,
-      play: () => { plays += 1; return Promise.resolve(); },
+      play: () => Promise.resolve(),
+      pause() {},
+      load() {},
+      removeAttribute() {},
+      dataset: {} as Record<string, string>,
+      onended: null as null | (() => void),
+      set src(v: string) { srcs.push(v); },
+      get src() { return srcs[srcs.length - 1]; },
     };
-    const vc = new Runtime.VoicePlaybackController({
+    const vc = new (Runtime.VoicePlaybackController as new (o: Record<string, unknown>) => {
+      setUnlocked(v: boolean): void;
+      enqueueChunk(p: Record<string, unknown>): void;
+      markFinal(p: Record<string, unknown>): void;
+      playing?: { messageId?: string };
+    })({
       audio,
       useMediaSource: true,
       playOnFirstChunk: true,
+      onDone: (q: { messageId: string }) => done.push(q.messageId),
       api: { postVoiceProgress: async () => ({}), postVoiceDone: async () => ({}) },
     });
     vc.setUnlocked(true);
-    vc.enqueueChunk({
-      roomId: "room-1",
-      messageId: "message-1",
-      audioBase64: "AA==",
-      mimeType: "audio/mpeg",
-      text: "第一段",
-    });
-    expect(vc.playing?.messageId).toBe("message-1");
-    expect(plays).toBe(1);
+    vc.enqueueChunk({ roomId: "r", messageId: "m1", audioBase64: "AAAA", mimeType: "audio/mpeg", text: "p1", seq: 0 });
+    // First chunk must NOT trigger playback without usable MediaSource.
+    expect(vc.playing).toBeFalsy();
+    expect(srcs.length).toBe(0);
+    vc.enqueueChunk({ roomId: "r", messageId: "m1", audioBase64: "BBBB", mimeType: "audio/mpeg", text: "p2", seq: 1 });
+    expect(vc.playing).toBeFalsy();
+    // Once final arrives, the full clip (all chunks) plays.
+    vc.markFinal({ roomId: "r", messageId: "m1", authorId: "a1", body: "p1p2" });
+    expect(vc.playing?.messageId).toBe("m1");
+    expect(srcs[0]).toBe("data:audio/mpeg;base64,AAAABBBB");
+    // Ending now is correct (the whole segment was buffered).
+    (audio.onended as () => void)();
+    expect(done).toEqual(["m1"]);
+  });
+
+  it("early-starts on the first chunk when MediaSource genuinely supports the mime", () => {
+    // Stub a usable MediaSource so the early-streaming path is exercised even in jsdom.
+    const g = globalThis as Record<string, unknown>;
+    const origMS = g.MediaSource;
+    const origURL = (g.URL as { createObjectURL?: unknown }).createObjectURL;
+    class FakeMediaSource {
+      static isTypeSupported() { return true; }
+      readyState = "closed";
+      addEventListener() {}
+      addSourceBuffer() { return { addEventListener() {}, appendBuffer() {}, updating: false, buffered: { length: 0 } }; }
+      endOfStream() {}
+    }
+    g.MediaSource = FakeMediaSource as unknown;
+    (g.URL as { createObjectURL: () => string }).createObjectURL = () => "blob:fake";
+    try {
+      let plays = 0;
+      const audio = {
+        currentTime: 0,
+        duration: Number.NaN,
+        play: () => { plays += 1; return Promise.resolve(); },
+        pause() {}, load() {}, removeAttribute() {},
+        dataset: {} as Record<string, string>,
+        set src(_v: string) {},
+        get src() { return ""; },
+      };
+      const vc = new (Runtime.VoicePlaybackController as new (o: Record<string, unknown>) => {
+        setUnlocked(v: boolean): void;
+        enqueueChunk(p: Record<string, unknown>): void;
+        playing?: { messageId?: string };
+      })({
+        audio,
+        useMediaSource: true,
+        playOnFirstChunk: true,
+        api: { postVoiceProgress: async () => ({}), postVoiceDone: async () => ({}) },
+      });
+      vc.setUnlocked(true);
+      vc.enqueueChunk({ roomId: "r", messageId: "m2", audioBase64: "AAAA", mimeType: "audio/mpeg", text: "p1", seq: 0 });
+      expect(vc.playing?.messageId).toBe("m2");
+      expect(plays).toBe(1);
+    } finally {
+      if (origMS === undefined) delete g.MediaSource; else g.MediaSource = origMS;
+      (g.URL as { createObjectURL?: unknown }).createObjectURL = origURL;
+    }
   });
 });
 
