@@ -9,8 +9,7 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { extname, join } from "node:path";
 // tiny-pinyin · CJK → pinyin so director handles like "@苏格拉底"
 // become "@sugeladi" instead of collapsing to "@_". Server-side
@@ -29,6 +28,12 @@ import {
 } from "../orchestrator/persona-builder.js";
 import { generateCelebritySeed } from "../orchestrator/celebrity-seed.js";
 import { extractMaterials, type MaterialDescriptor, type MaterialKind } from "../orchestrator/persona-materials.js";
+import {
+  UPLOAD_FILE_MODE,
+  createUploadBatchDir,
+  removeUploadBatchDir,
+  resolveUploadedFile,
+} from "../utils/upload-root.js";
 import {
   deleteUserLongMemory,
   getUserLongMemory,
@@ -370,6 +375,10 @@ function formatProfileWebContext(query: string, results: Array<{ title: string; 
 const MATERIAL_MAX_FILE_BYTES = 50 * 1024 * 1024;
 /** Max files per upload batch. */
 const MATERIAL_MAX_COUNT = 12;
+/** Total-request cap · checked against Content-Length BEFORE buffering
+ *  so a multi-GB body is rejected without being read into memory. Sized
+ *  at the batch ceiling (12 × 50MB) plus multipart-boundary slack. */
+const MATERIAL_MAX_TOTAL_BYTES = MATERIAL_MAX_COUNT * MATERIAL_MAX_FILE_BYTES + 16 * 1024 * 1024;
 
 const MATERIAL_TEXT_EXTS = new Set([".txt", ".md", ".markdown", ".text", ".rtf", ".csv", ".json", ".log"]);
 const MATERIAL_DOC_EXTS = new Set([".pdf", ".docx", ".doc"]);
@@ -399,10 +408,48 @@ function inferMaterialKind(mime: string, name: string): MaterialKind {
   return "text";
 }
 
+/** Union of every accepted upload extension. A file whose extension is
+ *  outside this set is rejected early at the upload boundary (the mime
+ *  is advisory / spoofable, the extension is what the extractor routes
+ *  on). */
+const MATERIAL_ALLOWED_EXTS = new Set<string>([
+  ...MATERIAL_TEXT_EXTS,
+  ...MATERIAL_DOC_EXTS,
+  ...MATERIAL_IMAGE_EXTS,
+  ...MATERIAL_AUDIO_EXTS,
+  ...MATERIAL_VIDEO_EXTS,
+]);
+
+/** Accepted top-level mime families · a quick allowlist that pairs with
+ *  the extension allowlist. Empty / generic mimes (octet-stream) fall
+ *  through to the extension check. */
+function isAllowedMaterialMime(mime: string): boolean {
+  const m = (mime || "").toLowerCase();
+  if (!m || m === "application/octet-stream") return true; // defer to ext
+  return (
+    m.startsWith("text/") ||
+    m.startsWith("image/") ||
+    m.startsWith("audio/") ||
+    m.startsWith("video/") ||
+    m === "application/pdf" ||
+    m === "application/msword" ||
+    m.includes("wordprocessingml") ||
+    m === "application/json" ||
+    m === "application/rtf"
+  );
+}
+
+/** True when a file's name/mime is in the allowlisted material set. */
+function isAllowedMaterial(name: string, mime: string): boolean {
+  const ext = extname(name || "").toLowerCase();
+  return MATERIAL_ALLOWED_EXTS.has(ext) && isAllowedMaterialMime(mime);
+}
+
 /** Validate + normalize the `materials` array from a /generate-persona
  *  request. Returns the descriptor array, "invalid" on a shape error,
- *  or null when absent. Drops descriptors whose tmp file is missing
- *  (re-upload required) rather than failing the whole build. */
+ *  or null when absent. Drops descriptors whose file is missing OR
+ *  outside the confined upload root (re-upload required) rather than
+ *  failing the whole build. */
 function parseMaterialsFromRequest(raw: unknown): MaterialDescriptor[] | "invalid" | null {
   if (raw == null) return null;
   if (!Array.isArray(raw)) return "invalid";
@@ -410,11 +457,15 @@ function parseMaterialsFromRequest(raw: unknown): MaterialDescriptor[] | "invali
   for (const item of raw.slice(0, MATERIAL_MAX_COUNT)) {
     if (!item || typeof item !== "object") continue;
     const o = item as Record<string, unknown>;
-    const filePath = typeof o.filePath === "string" ? o.filePath.trim() : "";
+    const rawPath = typeof o.filePath === "string" ? o.filePath.trim() : "";
+    if (!rawPath) continue;
+    // CONFINE the client-supplied path to the upload root · rejects
+    // traversal / absolute-escape / symlink-out / non-regular-file, and
+    // also covers the "tmp stash is gone" case (null on missing). A
+    // dropped descriptor degrades gracefully rather than blocking the
+    // build OR reading an arbitrary server file.
+    const filePath = resolveUploadedFile(rawPath);
     if (!filePath) continue;
-    // Skip descriptors whose tmp stash is gone · best-effort, never
-    // block the build on a vanished upload.
-    if (!existsSync(filePath) || !statSync(filePath).isFile()) continue;
     const name = typeof o.name === "string" && o.name.trim() ? o.name.trim() : "material";
     const mime = typeof o.mime === "string" ? o.mime : "";
     const kindRaw = typeof o.kind === "string" ? o.kind : "";
@@ -438,14 +489,29 @@ export function agentsRouter(): Hono {
   const r = new Hono();
 
   // ── New-Agent v2 · multipart multi-file materials upload ──────────
-  // Stashes each file to a per-batch tmp dir (mirroring
-  // /api/voice-clone/upload) and returns descriptors the composer
-  // threads back into /generate-persona as a one-time persona seed.
-  // Enforces a per-file size cap + a batch count cap with clear 400s.
+  // Stashes each file into a per-batch dir UNDER the confined upload
+  // root (private mode-0700 tree under tmp) and returns descriptors the
+  // composer threads back into /generate-persona as a one-time persona
+  // seed. Enforces a total-request cap (pre-buffer, via Content-Length),
+  // a per-file size cap, a batch count cap, and a MIME/extension
+  // allowlist — all with clear 400s. Partial writes are cleaned up on
+  // any failure.
   r.post("/materials/upload", async (c) => {
     const ct = c.req.header("content-type") || "";
     if (!ct.toLowerCase().startsWith("multipart/form-data")) {
       return c.json({ error: "expected multipart/form-data" }, 400);
+    }
+    // Reject an oversized body BEFORE buffering it · the Content-Length
+    // header is advisory but lets us shed a multi-GB request without
+    // reading it into memory. The per-file + buffer checks below are the
+    // authoritative limits.
+    const lenRaw = c.req.header("content-length") || "";
+    const contentLength = Number.parseInt(lenRaw, 10);
+    if (Number.isFinite(contentLength) && contentLength > MATERIAL_MAX_TOTAL_BYTES) {
+      return c.json(
+        { error: `upload too large (max ${Math.round(MATERIAL_MAX_TOTAL_BYTES / (1024 * 1024))}MB total)` },
+        413,
+      );
     }
     const form = await c.req.formData();
     // Accept files under "file" or "files" field names (browsers vary
@@ -463,38 +529,59 @@ export function agentsRouter(): Hono {
       return c.json({ error: `too many files (max ${MATERIAL_MAX_COUNT})` }, 400);
     }
 
-    const dir = join(tmpdir(), `pb-agent-materials-${randomBytes(6).toString("hex")}`);
-    mkdirSync(dir, { recursive: true });
+    // Per-batch dir inside the confined root · legit uploads land here so
+    // resolveUploadedFile() admits them at /generate-persona time.
+    const dir = createUploadBatchDir(`batch-${randomBytes(6).toString("hex")}`);
 
     const materials: MaterialDescriptor[] = [];
-    for (const file of files) {
-      if (file.size > MATERIAL_MAX_FILE_BYTES) {
-        return c.json(
-          { error: `"${file.name || "file"}" exceeds the ${Math.round(MATERIAL_MAX_FILE_BYTES / (1024 * 1024))}MB per-file limit` },
-          400,
-        );
+    try {
+      for (const file of files) {
+        const safeName = String(file.name || "material").replace(/[^A-Za-z0-9_.\- ]/g, "_") || "material";
+        const mime = file.type || "";
+        // Allowlist · reject unknown extensions / mimes early so a
+        // disallowed payload never gets buffered or written.
+        if (!isAllowedMaterial(safeName, mime)) {
+          removeUploadBatchDir(dir);
+          return c.json({ error: `"${safeName}" is not an accepted file type` }, 415);
+        }
+        // Reject oversized files from the advisory `file.size` BEFORE
+        // calling arrayBuffer() so a huge file never lands in memory.
+        if (file.size > MATERIAL_MAX_FILE_BYTES) {
+          removeUploadBatchDir(dir);
+          return c.json(
+            { error: `"${safeName}" exceeds the ${Math.round(MATERIAL_MAX_FILE_BYTES / (1024 * 1024))}MB per-file limit` },
+            413,
+          );
+        }
+        const path = join(dir, `${randomBytes(4).toString("hex")}-${safeName}`);
+        const buf = Buffer.from(await file.arrayBuffer());
+        // Double-check the realized buffer against the cap · `file.size`
+        // is advisory until the body is read.
+        if (buf.length > MATERIAL_MAX_FILE_BYTES) {
+          removeUploadBatchDir(dir);
+          return c.json(
+            { error: `"${safeName}" exceeds the ${Math.round(MATERIAL_MAX_FILE_BYTES / (1024 * 1024))}MB per-file limit` },
+            413,
+          );
+        }
+        // Owner-read/write only · the files can hold private notes.
+        writeFileSync(path, buf, { mode: UPLOAD_FILE_MODE });
+        materials.push({
+          id: newId(),
+          kind: inferMaterialKind(mime, safeName),
+          filePath: path,
+          name: safeName,
+          mime,
+          size: buf.length,
+        });
       }
-      const safeName = String(file.name || "material").replace(/[^A-Za-z0-9_.\- ]/g, "_") || "material";
-      const path = join(dir, `${randomBytes(4).toString("hex")}-${safeName}`);
-      const buf = Buffer.from(await file.arrayBuffer());
-      // Double-check the realized buffer against the cap · `file.size`
-      // is advisory until the body is read.
-      if (buf.length > MATERIAL_MAX_FILE_BYTES) {
-        return c.json(
-          { error: `"${safeName}" exceeds the ${Math.round(MATERIAL_MAX_FILE_BYTES / (1024 * 1024))}MB per-file limit` },
-          400,
-        );
-      }
-      writeFileSync(path, buf);
-      const mime = file.type || "";
-      materials.push({
-        id: newId(),
-        kind: inferMaterialKind(mime, safeName),
-        filePath: path,
-        name: safeName,
-        mime,
-        size: buf.length,
-      });
+    } catch (e) {
+      // Clean up the partial batch on any write / read failure so a
+      // failed upload doesn't leak a half-written dir.
+      removeUploadBatchDir(dir);
+      const msg = e instanceof Error ? e.message : String(e);
+      process.stderr.write(`[materials/upload] write failed: ${msg}\n`);
+      return c.json({ error: "upload failed" }, 500);
     }
 
     return c.json({ materials });
@@ -702,11 +789,16 @@ export function agentsRouter(): Hono {
     if (b.voiceSource && typeof b.voiceSource === "object") {
       const vs = b.voiceSource as { filePath?: unknown };
       if (typeof vs.filePath === "string" && vs.filePath.trim()) {
-        const p = vs.filePath.trim();
-        if (existsSync(p) && statSync(p).isFile()) {
-          voiceSourceFilePath = p;
+        // CONFINE the client-supplied path to the upload root · rejects
+        // traversal / absolute-escape / symlink-out / non-file and the
+        // vanished-upload case alike. A path outside the root (e.g.
+        // "/etc/passwd") is rejected with a 400 rather than fed to the
+        // voice clone.
+        const resolved = resolveUploadedFile(vs.filePath.trim());
+        if (resolved) {
+          voiceSourceFilePath = resolved;
         } else {
-          return c.json({ error: "voiceSource.filePath does not exist (re-upload the file)" }, 400);
+          return c.json({ error: "voiceSource.filePath is not a valid uploaded file (re-upload the file)" }, 400);
         }
       }
     }

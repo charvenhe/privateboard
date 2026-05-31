@@ -29,6 +29,7 @@ import { countMemoriesForAgent } from "./storage/memories.js";
 import { runDreamCycle, bootCeilingFor } from "./orchestrator/dream.js";
 import { ensureBoardroomDir, type BoardroomDirs } from "./utils/paths.js";
 import { findFreePort } from "./utils/port.js";
+import { sweepStaleUploads } from "./utils/upload-root.js";
 
 export interface BootOptions {
   port?: number;
@@ -113,6 +114,19 @@ export async function bootApp(opts: BootOptions = {}): Promise<BootResult> {
     }
   } catch (e) {
     process.stderr.write(`[boot] voice-clone recovery failed: ${errMsg(e)}\n`);
+  }
+
+  // Upload sweep · remove abandoned New-Agent v2 material/voice-source
+  // batch dirs older than the TTL (1h). A build consumes its uploads in
+  // seconds, so anything this old leaked (crash mid-build, client never
+  // submitted). Defends the confined upload root from unbounded growth.
+  try {
+    const removed = sweepStaleUploads();
+    if (removed > 0) {
+      process.stderr.write(`[boot] swept ${removed} stale upload batch dir(s)\n`);
+    }
+  } catch (e) {
+    process.stderr.write(`[boot] upload sweep failed: ${errMsg(e)}\n`);
   }
 
   // Dream sweep · fire-and-forget. Per-agent memory counters reset on
