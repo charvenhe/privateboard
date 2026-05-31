@@ -109,4 +109,40 @@ test.describe("new-agent v2 · mobile", () => {
       expect(typeof m.filePath).toBe("string");
     }
   });
+
+  test("in-app recording produces an audio material that becomes the voice source", async ({ page }) => {
+    await gotoNewAgent(page);
+
+    // Self-gate: some hosts (observed: macOS local) have a fake-audio pipeline
+    // where getUserMedia({audio}) never resolves, hanging the recorder. Skip
+    // cleanly there; runs + passes on Linux CI where fake audio works.
+    const micOk = await page.evaluate(() => new Promise<boolean>((res) => {
+      const t = setTimeout(() => res(false), 2500);
+      navigator.mediaDevices.getUserMedia({ audio: true })
+        .then((s) => { s.getTracks().forEach((x) => x.stop()); clearTimeout(t); res(true); })
+        .catch(() => { clearTimeout(t); res(false); });
+    }));
+    test.skip(!micOk, "fake-audio getUserMedia unavailable on this host (passes on Linux CI)");
+
+    const recBtn = page.locator("#na-rec-btn");
+    await expect(recBtn).toBeVisible();
+
+    // Start recording — label flips to stop and the button gains `.on`.
+    await recBtn.click();
+    await expect(recBtn).toHaveClass(/(^|\s)on(\s|$)/);
+    await expect(page.locator("#na-rec-btn .na-rec-lbl")).toContainText("停止录音");
+
+    // Let the fake-audio MediaRecorder buffer a beat before stopping.
+    await page.waitForTimeout(700);
+
+    // Stop — clip uploads and appears as an audio chip named "录音-…".
+    await recBtn.click();
+    const recChip = page.locator("#na-materials-chips .na-chip", { hasText: /^录音-/ });
+    await expect(recChip).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator("#na-materials-chips .na-chip.is-uploading")).toHaveCount(0, { timeout: 10_000 });
+
+    // The recorded clip auto-becomes the voice source.
+    await expect(recChip).toHaveClass(/(^|\s)is-voice(\s|$)/);
+    await expect(recChip.locator(".na-chip-voice.on")).toBeVisible();
+  });
 });

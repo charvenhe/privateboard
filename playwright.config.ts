@@ -21,6 +21,13 @@ export default defineConfig({
       use: {
         browserName: "chromium",
         viewport: { width: 1440, height: 900 },
+        // Fake mic + auto-grant getUserMedia so MediaRecorder actually
+        // produces audio for the in-app voice recording e2e. Harmless to
+        // non-media tests — the fake device only activates on getUserMedia.
+        permissions: ["microphone"],
+        launchOptions: {
+          args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"],
+        },
       },
     },
     {
@@ -33,6 +40,13 @@ export default defineConfig({
         isMobile: true,
         hasTouch: true,
         userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
+        // Fake mic + auto-grant getUserMedia so MediaRecorder actually
+        // produces audio for the in-app voice recording e2e. Harmless to
+        // non-media tests — the fake device only activates on getUserMedia.
+        permissions: ["microphone"],
+        launchOptions: {
+          args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"],
+        },
       },
     },
   ],
