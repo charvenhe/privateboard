@@ -867,7 +867,12 @@
         endTime: null,
       });
       q.totalCaptionBytes += bytes;
-      if (fresh && this.playOnFirstChunk && this.useMediaSource && !q.enqueued) {
+      // Only early-start (before `final`) when MediaSource can genuinely stream this
+      // mime: MSE keeps appending later chunks to the same buffer and only ends on
+      // `final`. Without usable MSE the playback path is a data: URI built from the
+      // chunks present right now, so starting early on a partial set truncates the
+      // segment under high latency. There we wait for markFinal() to enqueue.
+      if (fresh && this.playOnFirstChunk && !q.enqueued && this._mseUsable(q.mime)) {
         q.enqueued = true;
         q.playState = "queued";
         this.queue.push(q);
@@ -943,7 +948,10 @@
     pump() {
       if (!this.unlocked || !this.audio || this.playing) return;
       const next = this.queue[0];
-      const canStartStreaming = !!(this.playOnFirstChunk && this.useMediaSource && next && next.parts && next.parts.length);
+      const canStartStreaming = !!(
+        this.playOnFirstChunk && next && next.parts && next.parts.length
+        && this._mseUsable(next.mime)
+      );
       if (!next || (!next.final && !canStartStreaming)) return;
       this.queue.shift();
       this.playing = next;
@@ -965,10 +973,19 @@
         this._done(next);
       };
       if (next.parts.length) {
-        if (!this._startMediaSource(next, audio)) {
-          audio.src = "data:" + (next.mime || "audio/mpeg") + ";base64," + next.parts.join("");
+        if (this._startMediaSource(next, audio)) {
+          audio.onloadedmetadata = null; // MSE stamps caption endTimes via updateend
+        } else {
+          audio.src = this._fallbackAudioSrc(next);
+          // Non-MSE (iOS) has no sourceBuffer updateend to stamp caption
+          // endTimes, so currentCaption() would drift on a byte-ratio estimate
+          // ("first sentence aligns, rest don't"). Once metadata gives the real
+          // duration, distribute it across captions by byte share for accurate
+          // text-follows-audio.
+          audio.onloadedmetadata = () => this._fillCaptionTimes(next, audio);
         }
       } else {
+        audio.onloadedmetadata = null;
         audio.src = "/api/voices/message/" + encode(next.messageId) + "/audio?ts=" + Date.now();
       }
       try {
@@ -981,6 +998,56 @@
           this.onError(next, err);
           this.playing = null;
         });
+      }
+    }
+
+    _mseUsable(mime) {
+      // True only when MediaSource can genuinely stream this mime in THIS runtime.
+      // iOS Safari exposes no MediaSource (or returns false from isTypeSupported for
+      // audio/mpeg), so this is false there and we must wait for `final` instead of
+      // early-starting on a partial chunk set. Mirror the guards in _startMediaSource.
+      const MediaSourceCtor = global.MediaSource || global.WebKitMediaSource;
+      const URLApi = global.URL || global.webkitURL;
+      if (!this.useMediaSource || !MediaSourceCtor || !URLApi) return false;
+      const type = mime || "audio/mpeg";
+      if (typeof MediaSourceCtor.isTypeSupported === "function" && !MediaSourceCtor.isTypeSupported(type)) {
+        return false;
+      }
+      return true;
+    }
+
+    /** Non-MSE (iOS) playback source for a complete clip. The TTS chunks are
+     *  INDEPENDENTLY base64-encoded, so `parts.join("")` produces invalid
+     *  base64 whenever a non-final chunk is padded (e.g. "AA==" + "AQ==" →
+     *  "AA==AQ==", which decodes to just the first byte) — that truncated/
+     *  corrupt clip ends early and advances the queue. Concatenate the decoded
+     *  BYTES (q.buffers, same ones the MSE path appends) into one Blob instead;
+     *  fall back to the join only if Blob/URL are unavailable. */
+    _fallbackAudioSrc(q) {
+      const URLApi = global.URL || global.webkitURL;
+      const BlobCtor = global.Blob;
+      if (BlobCtor && URLApi && q.buffers && q.buffers.length) {
+        try {
+          const blob = new BlobCtor(q.buffers, { type: q.mime || "audio/mpeg" });
+          q.objectUrl = URLApi.createObjectURL(blob);
+          return q.objectUrl;
+        } catch (_) { /* fall through to data URI */ }
+      }
+      return "data:" + (q.mime || "audio/mpeg") + ";base64," + q.parts.join("");
+    }
+
+    /** Stamp each caption's endTime by its byte share of the (now-known) clip
+     *  duration. Used on the non-MSE path where there's no sourceBuffer
+     *  updateend to time captions; without it currentCaption() falls back to a
+     *  drifting byte-ratio estimate that only matches the first caption. */
+    _fillCaptionTimes(q, audio) {
+      const dur = audio && audio.duration;
+      if (!q || !q.captions || !q.captions.length) return;
+      if (!Number.isFinite(dur) || dur <= 0 || !q.totalCaptionBytes) return;
+      let acc = 0;
+      for (const cap of q.captions) {
+        acc += (cap && cap.bytes) ? cap.bytes : 0;
+        if (cap) cap.endTime = (acc / q.totalCaptionBytes) * dur;
       }
     }
 

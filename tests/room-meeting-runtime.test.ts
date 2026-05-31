@@ -318,29 +318,179 @@ describe("shared voice caption playback", () => {
     expect(vc.currentCaption(q)).toBe("第二句。");
   });
 
+  it("stamps caption endTimes by cumulative byte share of clip duration", () => {
+    const audio = { currentTime: 0, duration: 8, play: () => Promise.resolve() };
+    const vc = new Runtime.VoicePlaybackController({
+      audio,
+      api: { postVoiceProgress: async () => ({}), postVoiceDone: async () => ({}) },
+    });
+    const q = {
+      captions: [
+        { text: "第一句。", bytes: 30, endTime: null },
+        { text: "第二句。", bytes: 10, endTime: null },
+      ],
+      totalCaptionBytes: 40,
+    };
+    vc._fillCaptionTimes(q, audio);
+    // cumulative byte share × duration: (30/40)*8 = 6, (40/40)*8 = 8
+    expect(q.captions[0].endTime).toBe(6);
+    expect(q.captions[1].endTime).toBe(8);
+  });
+
   it("can start live voice from the first audio chunk instead of waiting for final", () => {
-    let plays = 0;
+    // Early-start before `final` is only safe when MediaSource can stream the mime;
+    // stub a usable MediaSource so this exercises the live-streaming path.
+    const g = globalThis as Record<string, unknown>;
+    const origMS = g.MediaSource;
+    const origURL = (g.URL as { createObjectURL?: unknown }).createObjectURL;
+    class FakeMediaSource {
+      static isTypeSupported() { return true; }
+      readyState = "closed";
+      addEventListener() {}
+      addSourceBuffer() { return { addEventListener() {}, appendBuffer() {}, updating: false, buffered: { length: 0 } }; }
+      endOfStream() {}
+    }
+    g.MediaSource = FakeMediaSource as unknown;
+    (g.URL as { createObjectURL: () => string }).createObjectURL = () => "blob:fake";
+    try {
+      let plays = 0;
+      const audio = {
+        currentTime: 0,
+        duration: Number.NaN,
+        play: () => { plays += 1; return Promise.resolve(); },
+        set src(_v: string) {},
+        get src() { return ""; },
+      };
+      const vc = new Runtime.VoicePlaybackController({
+        audio,
+        useMediaSource: true,
+        playOnFirstChunk: true,
+        api: { postVoiceProgress: async () => ({}), postVoiceDone: async () => ({}) },
+      });
+      vc.setUnlocked(true);
+      vc.enqueueChunk({
+        roomId: "room-1",
+        messageId: "message-1",
+        audioBase64: "AA==",
+        mimeType: "audio/mpeg",
+        text: "第一段",
+      });
+      expect(vc.playing?.messageId).toBe("message-1");
+      expect(plays).toBe(1);
+    } finally {
+      if (origMS === undefined) delete g.MediaSource; else g.MediaSource = origMS;
+      (g.URL as { createObjectURL?: unknown }).createObjectURL = origURL;
+    }
+  });
+
+  it("does NOT advance before final when MediaSource is unavailable (iOS/high-latency)", () => {
+    // No global.MediaSource here, so the controller falls back to the data: URI path
+    // (the iOS Safari path). Early-starting on the first chunk would truncate the
+    // segment under high latency, so playback must wait for markFinal().
+    expect((globalThis as { MediaSource?: unknown }).MediaSource).toBeUndefined();
+    const srcs: string[] = [];
+    const done: string[] = [];
     const audio = {
       currentTime: 0,
       duration: Number.NaN,
-      play: () => { plays += 1; return Promise.resolve(); },
+      play: () => Promise.resolve(),
+      pause() {},
+      load() {},
+      removeAttribute() {},
+      dataset: {} as Record<string, string>,
+      onended: null as null | (() => void),
+      set src(v: string) { srcs.push(v); },
+      get src() { return srcs[srcs.length - 1]; },
     };
-    const vc = new Runtime.VoicePlaybackController({
+    const vc = new (Runtime.VoicePlaybackController as new (o: Record<string, unknown>) => {
+      setUnlocked(v: boolean): void;
+      enqueueChunk(p: Record<string, unknown>): void;
+      markFinal(p: Record<string, unknown>): void;
+      playing?: { messageId?: string };
+    })({
       audio,
       useMediaSource: true,
       playOnFirstChunk: true,
+      onDone: (q: { messageId: string }) => done.push(q.messageId),
       api: { postVoiceProgress: async () => ({}), postVoiceDone: async () => ({}) },
     });
-    vc.setUnlocked(true);
-    vc.enqueueChunk({
-      roomId: "room-1",
-      messageId: "message-1",
-      audioBase64: "AA==",
-      mimeType: "audio/mpeg",
-      text: "第一段",
-    });
-    expect(vc.playing?.messageId).toBe("message-1");
-    expect(plays).toBe(1);
+    // Capture the Blob the non-MSE fallback hands to createObjectURL so we can
+    // assert the BYTES were concatenated correctly (not the base64 strings).
+    let capturedBlob: { size: number } | null = null;
+    const urlApi = globalThis.URL as unknown as { createObjectURL?: (b: unknown) => string; revokeObjectURL?: (u: string) => void };
+    const origCreate = urlApi.createObjectURL;
+    const origRevoke = urlApi.revokeObjectURL;
+    urlApi.createObjectURL = (b: unknown) => { capturedBlob = b as { size: number }; return "blob:test-m1"; };
+    urlApi.revokeObjectURL = () => {};
+    try {
+      vc.setUnlocked(true);
+      // Padded base64 chunks: "AA==" → [0x00], "AQ==" → [0x01]. Joining the
+      // base64 ("AA==AQ==") is INVALID and decodes to a single byte — the bug
+      // codex flagged. The fallback must concatenate the decoded BYTES → 2 bytes.
+      vc.enqueueChunk({ roomId: "r", messageId: "m1", audioBase64: "AA==", mimeType: "audio/mpeg", text: "p1", seq: 0 });
+      // First chunk must NOT trigger playback without usable MediaSource.
+      expect(vc.playing).toBeFalsy();
+      expect(srcs.length).toBe(0);
+      vc.enqueueChunk({ roomId: "r", messageId: "m1", audioBase64: "AQ==", mimeType: "audio/mpeg", text: "p2", seq: 1 });
+      expect(vc.playing).toBeFalsy();
+      // Once final arrives, the full clip (all chunks) plays as one Blob.
+      vc.markFinal({ roomId: "r", messageId: "m1", authorId: "a1", body: "p1p2" });
+      expect(vc.playing?.messageId).toBe("m1");
+      expect(srcs[0]).toBe("blob:test-m1");
+      // 2 bytes (one per chunk) — proves byte concat, not the 1-byte invalid join.
+      expect(capturedBlob && capturedBlob.size).toBe(2);
+      // Ending now is correct (the whole segment was buffered).
+      (audio.onended as () => void)();
+      expect(done).toEqual(["m1"]);
+    } finally {
+      urlApi.createObjectURL = origCreate;
+      urlApi.revokeObjectURL = origRevoke;
+    }
+  });
+
+  it("early-starts on the first chunk when MediaSource genuinely supports the mime", () => {
+    // Stub a usable MediaSource so the early-streaming path is exercised even in jsdom.
+    const g = globalThis as Record<string, unknown>;
+    const origMS = g.MediaSource;
+    const origURL = (g.URL as { createObjectURL?: unknown }).createObjectURL;
+    class FakeMediaSource {
+      static isTypeSupported() { return true; }
+      readyState = "closed";
+      addEventListener() {}
+      addSourceBuffer() { return { addEventListener() {}, appendBuffer() {}, updating: false, buffered: { length: 0 } }; }
+      endOfStream() {}
+    }
+    g.MediaSource = FakeMediaSource as unknown;
+    (g.URL as { createObjectURL: () => string }).createObjectURL = () => "blob:fake";
+    try {
+      let plays = 0;
+      const audio = {
+        currentTime: 0,
+        duration: Number.NaN,
+        play: () => { plays += 1; return Promise.resolve(); },
+        pause() {}, load() {}, removeAttribute() {},
+        dataset: {} as Record<string, string>,
+        set src(_v: string) {},
+        get src() { return ""; },
+      };
+      const vc = new (Runtime.VoicePlaybackController as new (o: Record<string, unknown>) => {
+        setUnlocked(v: boolean): void;
+        enqueueChunk(p: Record<string, unknown>): void;
+        playing?: { messageId?: string };
+      })({
+        audio,
+        useMediaSource: true,
+        playOnFirstChunk: true,
+        api: { postVoiceProgress: async () => ({}), postVoiceDone: async () => ({}) },
+      });
+      vc.setUnlocked(true);
+      vc.enqueueChunk({ roomId: "r", messageId: "m2", audioBase64: "AAAA", mimeType: "audio/mpeg", text: "p1", seq: 0 });
+      expect(vc.playing?.messageId).toBe("m2");
+      expect(plays).toBe(1);
+    } finally {
+      if (origMS === undefined) delete g.MediaSource; else g.MediaSource = origMS;
+      (g.URL as { createObjectURL?: unknown }).createObjectURL = origURL;
+    }
   });
 });
 

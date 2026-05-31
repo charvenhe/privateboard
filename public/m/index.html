@@ -964,6 +964,15 @@
   .na-pick:active { background: var(--panel-2); }
   .na-pick-icon { font-size: 18px; line-height: 1; color: var(--gold); flex: 0 0 auto; }
   .na-pick-text { font-size: 14px; color: var(--ink-mid); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* In-app voice recording button (clone source). */
+  .na-rec {
+    margin-top: 8px; width: 100%; padding: 11px 12px; border-radius: 10px;
+    background: transparent; border: 1px solid var(--rule); color: var(--ink-mid);
+    font-size: 14px; display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+  }
+  .na-rec:active { background: var(--panel-2); }
+  .na-rec.on { border-color: var(--red, #B5706A); color: var(--red, #B5706A); background: rgba(181,112,106,0.10); }
+  .na-rec .na-rec-time { font-variant-numeric: tabular-nums; opacity: 0.85; }
   .na-chips {
     display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px;
   }
@@ -1183,6 +1192,9 @@
           <span class="na-pick-text">添加文本 / PDF / Word / 图片 / 音视频</span>
           <input type="file" id="na-materials-input" accept=".txt,.md,.pdf,.doc,.docx,text/*,image/*,audio/*,video/*" multiple hidden>
         </label>
+        <button type="button" class="na-rec" id="na-rec-btn">
+          <span class="na-rec-lbl">🎙 录音</span><span class="na-rec-time"></span>
+        </button>
         <div class="na-chips" id="na-materials-chips"></div>
         <div class="na-section-hint">材料一次性塑造角色（不长期保存）。上传音视频会自动取第一个作声音克隆参考，点「🎙」可切换；也可在上方描述里粘贴视频链接。</div>
       </div>
@@ -1621,6 +1633,12 @@ function goto(screen) {
     $$('.tabbar .tab').forEach(b => b.classList.toggle('on', b.dataset.tab === tabMap[screen]));
   }
   if (screen === 'new-agent') { restoreAgentDraft(); wireNaExtras(); renderNaMaterials(); }
+  // Leaving the build screen must silence the build BGM. The build keeps
+  // running server-side, but the looping background audio is a build-screen
+  // affordance — without this it played on forever after navigating away.
+  if (screen !== 'build-progress') {
+    try { window.boardroomAgentBuildBgm?.stop?.(); } catch {}
+  }
   requestAnimationFrame(syncBottomChromeHeights);
   window.scrollTo(0, 0);
   persistMobileView(screen);
@@ -5474,34 +5492,120 @@ function resetNaExtras() {
   naVoiceKey = null;
   const mi = document.getElementById('na-materials-input');
   if (mi) mi.value = '';
+  stopNaRecording(true);
   renderNaMaterials();
+}
+// Upload one File into the materials list (optimistic chip → upload → replace
+// with the server descriptor). Shared by the file picker AND the recorder.
+async function naAddMaterialFile(file) {
+  const err = document.getElementById('new-agent-error');
+  const key = 'm' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+  naMaterials.push({ _key: key, name: file.name, mime: file.type, size: file.size, kind: naGuessKind(file), pending: true });
+  renderNaMaterials();
+  try {
+    const desc = await naUploadMaterial(file);
+    const idx = naMaterials.findIndex((m) => m._key === key);
+    if (idx >= 0) naMaterials[idx] = { ...desc, _key: key, pending: false };
+  } catch (e) {
+    naMaterials = naMaterials.filter((m) => m._key !== key);
+    if (err) { err.textContent = '上传失败（' + file.name + '）：' + e.message; err.style.display = 'block'; }
+  }
+  renderNaMaterials();
+}
+
+// ── In-app voice recording → clone source ─────────────────────────────
+// Records with MediaRecorder and feeds the clip into the materials list like
+// any uploaded audio (so it auto-becomes the voice-clone source). Kept local
+// to the composer — same getUserMedia/MediaRecorder pattern as voice-clone.js
+// but without that overlay's state. Needs a secure context (https / the
+// tunnel / localhost) for mic access.
+const naRec = { recorder: null, chunks: [], stream: null, timerId: 0, startedAt: 0, discard: false };
+function naPickRecMime() {
+  for (const m of ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus']) {
+    if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)) return m;
+  }
+  return '';
+}
+function naRecExt(mime) {
+  if (mime.includes('webm')) return 'webm';
+  if (mime.includes('mp4')) return 'm4a';
+  if (mime.includes('ogg')) return 'ogg';
+  return 'webm';
+}
+function naSetRecUI(recording) {
+  const btn = document.getElementById('na-rec-btn');
+  if (!btn) return;
+  btn.classList.toggle('on', !!recording);
+  const lbl = btn.querySelector('.na-rec-lbl');
+  if (lbl) lbl.textContent = recording ? '■ 停止录音' : '🎙 录音';
+  if (!recording) { const t = btn.querySelector('.na-rec-time'); if (t) t.textContent = ''; }
+}
+function naRecTick() {
+  const btn = document.getElementById('na-rec-btn');
+  const t = btn && btn.querySelector('.na-rec-time');
+  if (!t) return;
+  const s = Math.floor((performance.now() - naRec.startedAt) / 1000);
+  t.textContent = ' ' + Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+  if (s >= 120) toggleNaRecording(); // 2-min cap (provider clone limit)
+}
+async function toggleNaRecording() {
+  const err = document.getElementById('new-agent-error');
+  if (err) err.style.display = 'none';
+  if (naRec.recorder && naRec.recorder.state === 'recording') { try { naRec.recorder.stop(); } catch {} return; }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+  } catch (e) {
+    if (err) { err.textContent = '麦克风不可用：' + (e && e.message || e) + '（需 https / 已授权）'; err.style.display = 'block'; }
+    return;
+  }
+  naRec.stream = stream;
+  const mime = naPickRecMime();
+  let recorder;
+  try { recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined); }
+  catch (e) { stream.getTracks().forEach(t => t.stop()); naRec.stream = null; if (err) { err.textContent = '录音初始化失败：' + (e && e.message || e); err.style.display = 'block'; } return; }
+  naRec.recorder = recorder; naRec.chunks = []; naRec.discard = false; naRec.startedAt = performance.now();
+  recorder.addEventListener('dataavailable', (e) => { if (e.data && e.data.size > 0) naRec.chunks.push(e.data); });
+  recorder.addEventListener('stop', onNaRecordingStopped);
+  recorder.start();
+  naSetRecUI(true);
+  clearInterval(naRec.timerId);
+  naRec.timerId = window.setInterval(naRecTick, 250);
+}
+function stopNaRecording(discard) {
+  clearInterval(naRec.timerId); naRec.timerId = 0;
+  if (naRec.recorder && naRec.recorder.state === 'recording') { naRec.discard = !!discard; try { naRec.recorder.stop(); } catch {} }
+  else if (naRec.stream) { naRec.stream.getTracks().forEach(t => t.stop()); naRec.stream = null; }
+  naSetRecUI(false);
+}
+function onNaRecordingStopped() {
+  clearInterval(naRec.timerId); naRec.timerId = 0;
+  const chunks = naRec.chunks || [];
+  const mime = (naRec.recorder && naRec.recorder.mimeType) || 'audio/webm';
+  const discard = naRec.discard; naRec.discard = false;
+  if (naRec.stream) { naRec.stream.getTracks().forEach(t => t.stop()); naRec.stream = null; }
+  naRec.recorder = null; naRec.chunks = [];
+  naSetRecUI(false);
+  if (discard || !chunks.length) return;
+  const ext = naRecExt(mime);
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const file = new File(chunks, '录音-' + ts + '.' + ext, { type: mime });
+  naAddMaterialFile(file);
 }
 function wireNaExtras() {
   const matInput = document.getElementById('na-materials-input');
-  const err = document.getElementById('new-agent-error');
-  const showErr = (m) => { if (err) { err.textContent = m; err.style.display = 'block'; } };
-
   if (matInput && !matInput.dataset.wired) {
     matInput.dataset.wired = '1';
     matInput.addEventListener('change', async () => {
       const files = Array.from(matInput.files || []);
       matInput.value = '';
-      for (const f of files) {
-        const key = 'm' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
-        const placeholder = { _key: key, name: f.name, mime: f.type, size: f.size, kind: naGuessKind(f), pending: true };
-        naMaterials.push(placeholder);
-        renderNaMaterials();
-        try {
-          const desc = await naUploadMaterial(f);
-          const idx = naMaterials.findIndex((m) => m._key === key);
-          if (idx >= 0) naMaterials[idx] = { ...desc, _key: key, pending: false };
-        } catch (e) {
-          naMaterials = naMaterials.filter((m) => m._key !== key);
-          showErr('材料上传失败（' + f.name + '）：' + e.message);
-        }
-        renderNaMaterials();
-      }
+      for (const f of files) { await naAddMaterialFile(f); }
     });
+  }
+  const recBtn = document.getElementById('na-rec-btn');
+  if (recBtn && !recBtn.dataset.wired) {
+    recBtn.dataset.wired = '1';
+    recBtn.addEventListener('click', () => { toggleNaRecording(); });
   }
 }
 

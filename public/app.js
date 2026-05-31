@@ -368,6 +368,12 @@
           this.setAgentVoiceKey(voiceKey.getAttribute("data-agent-voice-key"));
           return;
         }
+        const recBtn = e.target.closest("[data-agent-rec]");
+        if (recBtn) {
+          e.preventDefault();
+          this.toggleAgentRecording();
+          return;
+        }
       });
 
       // Thread trigger · per-bubble "// thread" link on each director
@@ -13100,6 +13106,9 @@
                   <span class="ag-pick-text">Add text / PDF / Word / images / audio / video</span>
                   <input type="file" accept=".txt,.md,.pdf,.doc,.docx,text/*,image/*,audio/*,video/*" multiple hidden data-agent-materials-input>
                 </label>
+                <button type="button" class="ag-rec" data-agent-rec>
+                  <span class="ag-rec-lbl">🎙 录音</span><span class="ag-rec-time"></span>
+                </button>
                 <div class="ag-chips" data-agent-materials-chips></div>
                 <div class="ag-extra-hint">A one-time seed for this build · not kept as a knowledge base. The first audio/video you add clones the voice automatically — click 🎙 to switch. Or paste a video link into the prompt above.</div>
               </div>
@@ -13411,25 +13420,31 @@
       this._agentVoiceKey = key;
       this._renderAgentMaterials();
     },
+    /** Upload one File into the materials list (optimistic chip → upload →
+     *  replace with the server descriptor). Shared by the file picker AND the
+     *  in-app recorder. */
+    async _addAgentMaterialFile(f) {
+      const key = "m" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+      this._agentMaterials.push({
+        _key: key, name: f.name, mime: f.type, size: f.size,
+        kind: this._guessMaterialKind(f), pending: true,
+      });
+      this._renderAgentMaterials();
+      try {
+        const desc = await this._uploadMaterial(f);
+        const idx = this._agentMaterials.findIndex((m) => m._key === key);
+        if (idx >= 0) this._agentMaterials[idx] = { ...desc, _key: key, pending: false };
+      } catch (e) {
+        this._agentMaterials = this._agentMaterials.filter((m) => m._key !== key);
+        alert("Material upload failed (" + f.name + "): " + (e && e.message ? e.message : e));
+      }
+      this._renderAgentMaterials();
+    },
     async onAgentMaterialsPick(input) {
       const files = Array.from((input && input.files) || []);
       if (input) input.value = "";
       for (const f of files) {
-        const key = "m" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
-        this._agentMaterials.push({
-          _key: key, name: f.name, mime: f.type, size: f.size,
-          kind: this._guessMaterialKind(f), pending: true,
-        });
-        this._renderAgentMaterials();
-        try {
-          const desc = await this._uploadMaterial(f);
-          const idx = this._agentMaterials.findIndex((m) => m._key === key);
-          if (idx >= 0) this._agentMaterials[idx] = { ...desc, _key: key, pending: false };
-        } catch (e) {
-          this._agentMaterials = this._agentMaterials.filter((m) => m._key !== key);
-          alert("Material upload failed (" + f.name + "): " + (e && e.message ? e.message : e));
-        }
-        this._renderAgentMaterials();
+        await this._addAgentMaterialFile(f);
       }
     },
     removeAgentMaterial(key) {
@@ -13451,9 +13466,91 @@
       };
     },
     _resetAgentExtras() {
+      this.stopAgentRecording(true);
       this._agentMaterials = [];
       this._agentVoiceKey = null;
       this._renderAgentMaterials();
+    },
+
+    /* ─── In-app voice recording → clone source ───────────────────────
+       Mirrors the mobile new-agent recorder (public/m/index.html). Records
+       with MediaRecorder (2-min cap, provider clone limit), then feeds the
+       clip into the materials list via _addAgentMaterialFile like any
+       uploaded audio (so it auto-becomes the voice-clone source). Needs a
+       secure context (https / localhost) for mic access. */
+    _agentRec: { recorder: null, chunks: [], stream: null, timerId: 0, startedAt: 0, discard: false },
+    _recPickMime() {
+      for (const m of ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"]) {
+        if (typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)) return m;
+      }
+      return "";
+    },
+    _recExt(mime) {
+      if (mime.includes("webm")) return "webm";
+      if (mime.includes("mp4")) return "m4a";
+      if (mime.includes("ogg")) return "ogg";
+      return "webm";
+    },
+    _setRecUI(recording) {
+      const btn = document.querySelector("[data-agent-rec]");
+      if (!btn) return;
+      btn.classList.toggle("on", !!recording);
+      const lbl = btn.querySelector(".ag-rec-lbl");
+      if (lbl) lbl.textContent = recording ? "■ 停止录音" : "🎙 录音";
+      if (!recording) { const t = btn.querySelector(".ag-rec-time"); if (t) t.textContent = ""; }
+    },
+    _recTick() {
+      const btn = document.querySelector("[data-agent-rec]");
+      const t = btn && btn.querySelector(".ag-rec-time");
+      if (!t) return;
+      const s = Math.floor((performance.now() - this._agentRec.startedAt) / 1000);
+      t.textContent = " " + Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+      if (s >= 120) this.toggleAgentRecording(); // 2-min cap (provider clone limit)
+    },
+    async toggleAgentRecording() {
+      const rec = this._agentRec;
+      if (rec.recorder && rec.recorder.state === "recording") { try { rec.recorder.stop(); } catch { /* */ } return; }
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+      } catch (e) {
+        alert("麦克风不可用：" + (e && e.message ? e.message : e) + "（需 https / 已授权）");
+        return;
+      }
+      rec.stream = stream;
+      const mime = this._recPickMime();
+      let recorder;
+      try { recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined); }
+      catch (e) { stream.getTracks().forEach((t) => t.stop()); rec.stream = null; alert("录音初始化失败：" + (e && e.message ? e.message : e)); return; }
+      rec.recorder = recorder; rec.chunks = []; rec.discard = false; rec.startedAt = performance.now();
+      recorder.addEventListener("dataavailable", (e) => { if (e.data && e.data.size > 0) rec.chunks.push(e.data); });
+      recorder.addEventListener("stop", () => this._onAgentRecordingStopped());
+      recorder.start();
+      this._setRecUI(true);
+      clearInterval(rec.timerId);
+      rec.timerId = window.setInterval(() => this._recTick(), 250);
+    },
+    stopAgentRecording(discard) {
+      const rec = this._agentRec;
+      clearInterval(rec.timerId); rec.timerId = 0;
+      if (rec.recorder && rec.recorder.state === "recording") { rec.discard = !!discard; try { rec.recorder.stop(); } catch { /* */ } }
+      else if (rec.stream) { rec.stream.getTracks().forEach((t) => t.stop()); rec.stream = null; }
+      this._setRecUI(false);
+    },
+    _onAgentRecordingStopped() {
+      const rec = this._agentRec;
+      clearInterval(rec.timerId); rec.timerId = 0;
+      const chunks = rec.chunks || [];
+      const mime = (rec.recorder && rec.recorder.mimeType) || "audio/webm";
+      const discard = rec.discard; rec.discard = false;
+      if (rec.stream) { rec.stream.getTracks().forEach((t) => t.stop()); rec.stream = null; }
+      rec.recorder = null; rec.chunks = [];
+      this._setRecUI(false);
+      if (discard || !chunks.length) return;
+      const ext = this._recExt(mime);
+      const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      const file = new File(chunks, "录音-" + ts + "." + ext, { type: mime });
+      this._addAgentMaterialFile(file);
     },
 
     async submitAgentComposer() {

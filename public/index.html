@@ -12358,6 +12358,27 @@
     transition: border-color 0.18s ease, background 0.18s ease;
   }
   .ag-pick:hover { border-color: var(--lime); }
+  /* In-app voice recording button (clone source) · mirrors mobile .na-rec. */
+  .ag-rec {
+    margin-top: 8px;
+    width: 100%;
+    box-sizing: border-box;
+    padding: 11px 12px;
+    border-radius: 8px;
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--text-soft);
+    font-size: 14px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    cursor: pointer;
+    transition: border-color 0.18s ease, background 0.18s ease, color 0.18s ease;
+  }
+  .ag-rec:hover { border-color: var(--line-bright); }
+  .ag-rec.on { border-color: var(--red); color: var(--red); background: rgba(181, 112, 106, 0.10); }
+  .ag-rec .ag-rec-time { font-variant-numeric: tabular-nums; opacity: 0.85; }
   .ag-pick-icon { font-size: 16px; line-height: 1; color: var(--lime); flex: 0 0 auto; }
   .ag-pick-text {
     font-size: 14px;
