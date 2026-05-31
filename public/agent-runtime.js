@@ -250,11 +250,26 @@
 
   /** Build the /generate-persona body. voiceSourceUrl is only attached
    *  when a recognised video URL was actually extracted (PC omits it
-   *  otherwise; an empty string would read as an intentional override). */
+   *  otherwise; an empty string would read as an intentional override).
+   *
+   *  New-agent v2 adds two optional fields (both omitted when empty so a
+   *  build with no extras matches the prior contract exactly):
+   *    · materials   — array of upload descriptors
+   *                    [{ id, kind, filePath, name, mime, size }] returned
+   *                    by POST /api/agents/materials/upload. A local
+   *                    audio/video voice source is also included here
+   *                    (deduped by filePath) so the server can extract a
+   *                    transcript from it as persona seed material.
+   *    · voiceSource — { filePath } of the descriptor chosen as the
+   *                    voice-clone source. The server clones from this
+   *                    local file during the build (parallel to the
+   *                    voiceSourceUrl URL path, which keeps working). */
   function buildPersonaStartPayload(description, opts) {
     const o = opts || {};
     const body = { description: String(description || ""), locale: o.locale || "en" };
     if (o.voiceSourceUrl) body.voiceSourceUrl = o.voiceSourceUrl;
+    if (Array.isArray(o.materials) && o.materials.length) body.materials = o.materials;
+    if (o.voiceSource && o.voiceSource.filePath) body.voiceSource = { filePath: o.voiceSource.filePath };
     return body;
   }
 
