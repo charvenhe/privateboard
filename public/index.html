@@ -12322,6 +12322,123 @@
      accent gradient. The avatar tile on the left is the ONLY
      decorative element — but it's content, not chrome (the 8-bit
      portrait is the identity signal). */
+  /* ─── new-agent v2 · local voice source + persona materials ─── */
+  .ag-extras {
+    margin-top: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+  .ag-extra { min-width: 0; }
+  .ag-extra-label {
+    font-size: 12px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-soft);
+    margin-bottom: 8px;
+  }
+  .ag-extra-hint {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-top: 8px;
+    line-height: 1.5;
+  }
+  .ag-pick {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    box-sizing: border-box;
+    padding: 12px 14px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    cursor: pointer;
+    color: var(--text);
+    transition: border-color 0.18s ease, background 0.18s ease;
+  }
+  .ag-pick:hover { border-color: var(--lime); }
+  .ag-pick-icon { font-size: 16px; line-height: 1; color: var(--lime); flex: 0 0 auto; }
+  .ag-pick-text {
+    font-size: 14px;
+    color: var(--text-soft);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ag-voice-chosen {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 10px;
+    padding: 10px 12px;
+    background: rgba(201, 164, 107, 0.08);
+    border: 1px solid rgba(201, 164, 107, 0.25);
+    border-radius: 8px;
+  }
+  .ag-voice-chosen-name {
+    font-size: 14px;
+    color: var(--text);
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ag-voice-chosen-tag { font-size: 12px; color: var(--text-soft); flex: 0 0 auto; }
+  .ag-voice-remove {
+    flex: 0 0 auto;
+    width: 24px;
+    height: 24px;
+    border-radius: 5px;
+    background: transparent;
+    border: none;
+    color: var(--text-soft);
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .ag-voice-remove:hover { background: rgba(255,255,255,0.06); color: var(--text); }
+  .ag-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .ag-chips:empty { margin-top: 0; }
+  .ag-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 100%;
+    box-sizing: border-box;
+    padding: 7px 10px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    font-size: 14px;
+    color: var(--text);
+  }
+  .ag-chip.is-uploading { opacity: 0.55; }
+  .ag-chip-icon { flex: 0 0 auto; font-size: 14px; line-height: 1; color: var(--lime); }
+  .ag-chip-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ag-chip-size { flex: 0 0 auto; font-size: 12px; color: var(--text-dim); }
+  .ag-chip-rm {
+    flex: 0 0 auto;
+    width: 20px;
+    height: 20px;
+    border-radius: 4px;
+    background: transparent;
+    border: none;
+    color: var(--text-soft);
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .ag-chip-rm:hover { background: rgba(255,255,255,0.06); color: var(--text); }
+
   .cmp-celeb-stack {
     margin-top: 32px;
   }
