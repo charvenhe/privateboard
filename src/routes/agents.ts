@@ -8,6 +8,10 @@
  */
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
+import { randomBytes } from "node:crypto";
+import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { extname, join } from "node:path";
 // tiny-pinyin · CJK → pinyin so director handles like "@苏格拉底"
 // become "@sugeladi" instead of collapsing to "@_". Server-side
 // only · the slugifier in `slugifyHandle` runs the conversion
@@ -24,6 +28,7 @@ import {
   startPersonaBuild,
 } from "../orchestrator/persona-builder.js";
 import { generateCelebritySeed } from "../orchestrator/celebrity-seed.js";
+import { extractMaterials, type MaterialDescriptor, type MaterialKind } from "../orchestrator/persona-materials.js";
 import {
   deleteUserLongMemory,
   getUserLongMemory,
@@ -357,8 +362,143 @@ function formatProfileWebContext(query: string, results: Array<{ title: string; 
   return lines.join("\n");
 }
 
+/* ─────────── New-Agent v2 · materials upload ─────────── */
+
+/** Per-file size cap · 50MB. Big enough for a multi-page PDF or a
+ *  short audio/video clip; small enough that a single upload can't
+ *  exhaust tmp / memory. */
+const MATERIAL_MAX_FILE_BYTES = 50 * 1024 * 1024;
+/** Max files per upload batch. */
+const MATERIAL_MAX_COUNT = 12;
+
+const MATERIAL_TEXT_EXTS = new Set([".txt", ".md", ".markdown", ".text", ".rtf", ".csv", ".json", ".log"]);
+const MATERIAL_DOC_EXTS = new Set([".pdf", ".docx", ".doc"]);
+const MATERIAL_IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".heic", ".heif", ".svg"]);
+const MATERIAL_AUDIO_EXTS = new Set([".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac", ".opus", ".wma"]);
+const MATERIAL_VIDEO_EXTS = new Set([".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v", ".flv"]);
+
+/** Infer a material kind from mime first, extension as fallback.
+ *  Defaults to "doc" for unknown binary, "text" for text/* mimes. */
+function inferMaterialKind(mime: string, name: string): MaterialKind {
+  const m = (mime || "").toLowerCase();
+  if (m.startsWith("image/")) return "image";
+  if (m.startsWith("audio/")) return "audio";
+  if (m.startsWith("video/")) return "video";
+  if (m === "application/pdf") return "doc";
+  if (m.includes("wordprocessingml") || m === "application/msword") return "doc";
+  if (m.startsWith("text/")) return "text";
+
+  const ext = extname(name || "").toLowerCase();
+  if (MATERIAL_IMAGE_EXTS.has(ext)) return "image";
+  if (MATERIAL_AUDIO_EXTS.has(ext)) return "audio";
+  if (MATERIAL_VIDEO_EXTS.has(ext)) return "video";
+  if (MATERIAL_DOC_EXTS.has(ext)) return "doc";
+  if (MATERIAL_TEXT_EXTS.has(ext)) return "text";
+  // Unknown · treat as text so it's at least read attempt-able; the
+  // extractor degrades to "noted" if it turns out to be binary.
+  return "text";
+}
+
+/** Validate + normalize the `materials` array from a /generate-persona
+ *  request. Returns the descriptor array, "invalid" on a shape error,
+ *  or null when absent. Drops descriptors whose tmp file is missing
+ *  (re-upload required) rather than failing the whole build. */
+function parseMaterialsFromRequest(raw: unknown): MaterialDescriptor[] | "invalid" | null {
+  if (raw == null) return null;
+  if (!Array.isArray(raw)) return "invalid";
+  const out: MaterialDescriptor[] = [];
+  for (const item of raw.slice(0, MATERIAL_MAX_COUNT)) {
+    if (!item || typeof item !== "object") continue;
+    const o = item as Record<string, unknown>;
+    const filePath = typeof o.filePath === "string" ? o.filePath.trim() : "";
+    if (!filePath) continue;
+    // Skip descriptors whose tmp stash is gone · best-effort, never
+    // block the build on a vanished upload.
+    if (!existsSync(filePath) || !statSync(filePath).isFile()) continue;
+    const name = typeof o.name === "string" && o.name.trim() ? o.name.trim() : "material";
+    const mime = typeof o.mime === "string" ? o.mime : "";
+    const kindRaw = typeof o.kind === "string" ? o.kind : "";
+    const kind: MaterialKind =
+      kindRaw === "text" || kindRaw === "doc" || kindRaw === "image" || kindRaw === "audio" || kindRaw === "video"
+        ? kindRaw
+        : inferMaterialKind(mime, name);
+    out.push({
+      id: typeof o.id === "string" && o.id ? o.id : newId(),
+      kind,
+      filePath,
+      name,
+      mime,
+      size: typeof o.size === "number" && Number.isFinite(o.size) ? o.size : 0,
+    });
+  }
+  return out;
+}
+
 export function agentsRouter(): Hono {
   const r = new Hono();
+
+  // ── New-Agent v2 · multipart multi-file materials upload ──────────
+  // Stashes each file to a per-batch tmp dir (mirroring
+  // /api/voice-clone/upload) and returns descriptors the composer
+  // threads back into /generate-persona as a one-time persona seed.
+  // Enforces a per-file size cap + a batch count cap with clear 400s.
+  r.post("/materials/upload", async (c) => {
+    const ct = c.req.header("content-type") || "";
+    if (!ct.toLowerCase().startsWith("multipart/form-data")) {
+      return c.json({ error: "expected multipart/form-data" }, 400);
+    }
+    const form = await c.req.formData();
+    // Accept files under "file" or "files" field names (browsers vary
+    // by how the multi-file input is appended). FormDataEntryValue is
+    // `string | File` at runtime; we keep only the File entries (same
+    // `instanceof File` narrowing the voice-clone upload uses).
+    const files: File[] = [];
+    for (const entry of [...form.getAll("file"), ...form.getAll("files")]) {
+      if (entry instanceof File) files.push(entry);
+    }
+    if (files.length === 0) {
+      return c.json({ error: "missing file field" }, 400);
+    }
+    if (files.length > MATERIAL_MAX_COUNT) {
+      return c.json({ error: `too many files (max ${MATERIAL_MAX_COUNT})` }, 400);
+    }
+
+    const dir = join(tmpdir(), `pb-agent-materials-${randomBytes(6).toString("hex")}`);
+    mkdirSync(dir, { recursive: true });
+
+    const materials: MaterialDescriptor[] = [];
+    for (const file of files) {
+      if (file.size > MATERIAL_MAX_FILE_BYTES) {
+        return c.json(
+          { error: `"${file.name || "file"}" exceeds the ${Math.round(MATERIAL_MAX_FILE_BYTES / (1024 * 1024))}MB per-file limit` },
+          400,
+        );
+      }
+      const safeName = String(file.name || "material").replace(/[^A-Za-z0-9_.\- ]/g, "_") || "material";
+      const path = join(dir, `${randomBytes(4).toString("hex")}-${safeName}`);
+      const buf = Buffer.from(await file.arrayBuffer());
+      // Double-check the realized buffer against the cap · `file.size`
+      // is advisory until the body is read.
+      if (buf.length > MATERIAL_MAX_FILE_BYTES) {
+        return c.json(
+          { error: `"${safeName}" exceeds the ${Math.round(MATERIAL_MAX_FILE_BYTES / (1024 * 1024))}MB per-file limit` },
+          400,
+        );
+      }
+      writeFileSync(path, buf);
+      const mime = file.type || "";
+      materials.push({
+        id: newId(),
+        kind: inferMaterialKind(mime, safeName),
+        filePath: path,
+        name: safeName,
+        mime,
+        size: buf.length,
+      });
+    }
+
+    return c.json({ materials });
+  });
 
   // Director list. The chair (moderator) is bundled separately so the
   // client can surface it in the sidebar with special treatment without
@@ -528,7 +668,13 @@ export function agentsRouter(): Hono {
     let body: unknown;
     try { body = await c.req.json(); }
     catch { return c.json({ error: "invalid JSON body" }, 400); }
-    const b = (body ?? {}) as { description?: unknown; locale?: unknown; voiceSourceUrl?: unknown };
+    const b = (body ?? {}) as {
+      description?: unknown;
+      locale?: unknown;
+      voiceSourceUrl?: unknown;
+      materials?: unknown;
+      voiceSource?: unknown;
+    };
     const description = typeof b.description === "string" ? b.description.trim() : "";
     if (description.length < 2) {
       return c.json({ error: "describe the director in at least a few words" }, 400);
@@ -548,7 +694,53 @@ export function agentsRouter(): Hono {
     const voiceSourceUrl = voiceSourceUrlRaw && /^https?:\/\//i.test(voiceSourceUrlRaw)
       ? voiceSourceUrlRaw.slice(0, 500)
       : undefined;
-    const jobId = startPersonaBuild({ description, locale, voiceSourceUrl });
+
+    // New-Agent v2 · optional local voice source (uploaded file). Takes
+    // precedence over voiceSourceUrl in Phase 5. The filePath must point
+    // at a tmp stash produced by POST /api/agents/materials/upload.
+    let voiceSourceFilePath: string | undefined;
+    if (b.voiceSource && typeof b.voiceSource === "object") {
+      const vs = b.voiceSource as { filePath?: unknown };
+      if (typeof vs.filePath === "string" && vs.filePath.trim()) {
+        const p = vs.filePath.trim();
+        if (existsSync(p) && statSync(p).isFile()) {
+          voiceSourceFilePath = p;
+        } else {
+          return c.json({ error: "voiceSource.filePath does not exist (re-upload the file)" }, 400);
+        }
+      }
+    }
+
+    // New-Agent v2 · optional materials seed. Validate the descriptor
+    // array shape + tmp-file presence at the boundary, then extract a
+    // consolidated context (best-effort · per-file failures degrade).
+    // Materials are a ONE-TIME seed; nothing here is persisted beyond
+    // the build.
+    let materialsContext: string | undefined;
+    const materials = parseMaterialsFromRequest(b.materials);
+    if (materials === "invalid") {
+      return c.json({ error: "materials must be an array of upload descriptors" }, 400);
+    }
+    if (materials && materials.length > 0) {
+      try {
+        const extracted = await extractMaterials(materials, { signal: c.req.raw.signal });
+        materialsContext = extracted.materialsContext || undefined;
+      } catch (e) {
+        // Extraction is best-effort · a wholesale failure should not
+        // block the build. Log + proceed with no materials context.
+        process.stderr.write(
+          `[generate-persona] material extraction failed: ${e instanceof Error ? e.message : String(e)}\n`,
+        );
+      }
+    }
+
+    const jobId = startPersonaBuild({
+      description,
+      locale,
+      voiceSourceUrl,
+      voiceSourceFilePath,
+      materialsContext,
+    });
     return c.json({ jobId });
   });
 
