@@ -1621,6 +1621,12 @@ function goto(screen) {
     $$('.tabbar .tab').forEach(b => b.classList.toggle('on', b.dataset.tab === tabMap[screen]));
   }
   if (screen === 'new-agent') { restoreAgentDraft(); wireNaExtras(); renderNaMaterials(); }
+  // Leaving the build screen must silence the build BGM. The build keeps
+  // running server-side, but the looping background audio is a build-screen
+  // affordance — without this it played on forever after navigating away.
+  if (screen !== 'build-progress') {
+    try { window.boardroomAgentBuildBgm?.stop?.(); } catch {}
+  }
   requestAnimationFrame(syncBottomChromeHeights);
   window.scrollTo(0, 0);
   persistMobileView(screen);
