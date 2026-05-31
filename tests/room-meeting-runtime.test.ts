@@ -395,20 +395,38 @@ describe("shared voice caption playback", () => {
       onDone: (q: { messageId: string }) => done.push(q.messageId),
       api: { postVoiceProgress: async () => ({}), postVoiceDone: async () => ({}) },
     });
-    vc.setUnlocked(true);
-    vc.enqueueChunk({ roomId: "r", messageId: "m1", audioBase64: "AAAA", mimeType: "audio/mpeg", text: "p1", seq: 0 });
-    // First chunk must NOT trigger playback without usable MediaSource.
-    expect(vc.playing).toBeFalsy();
-    expect(srcs.length).toBe(0);
-    vc.enqueueChunk({ roomId: "r", messageId: "m1", audioBase64: "BBBB", mimeType: "audio/mpeg", text: "p2", seq: 1 });
-    expect(vc.playing).toBeFalsy();
-    // Once final arrives, the full clip (all chunks) plays.
-    vc.markFinal({ roomId: "r", messageId: "m1", authorId: "a1", body: "p1p2" });
-    expect(vc.playing?.messageId).toBe("m1");
-    expect(srcs[0]).toBe("data:audio/mpeg;base64,AAAABBBB");
-    // Ending now is correct (the whole segment was buffered).
-    (audio.onended as () => void)();
-    expect(done).toEqual(["m1"]);
+    // Capture the Blob the non-MSE fallback hands to createObjectURL so we can
+    // assert the BYTES were concatenated correctly (not the base64 strings).
+    let capturedBlob: { size: number } | null = null;
+    const urlApi = globalThis.URL as unknown as { createObjectURL?: (b: unknown) => string; revokeObjectURL?: (u: string) => void };
+    const origCreate = urlApi.createObjectURL;
+    const origRevoke = urlApi.revokeObjectURL;
+    urlApi.createObjectURL = (b: unknown) => { capturedBlob = b as { size: number }; return "blob:test-m1"; };
+    urlApi.revokeObjectURL = () => {};
+    try {
+      vc.setUnlocked(true);
+      // Padded base64 chunks: "AA==" → [0x00], "AQ==" → [0x01]. Joining the
+      // base64 ("AA==AQ==") is INVALID and decodes to a single byte — the bug
+      // codex flagged. The fallback must concatenate the decoded BYTES → 2 bytes.
+      vc.enqueueChunk({ roomId: "r", messageId: "m1", audioBase64: "AA==", mimeType: "audio/mpeg", text: "p1", seq: 0 });
+      // First chunk must NOT trigger playback without usable MediaSource.
+      expect(vc.playing).toBeFalsy();
+      expect(srcs.length).toBe(0);
+      vc.enqueueChunk({ roomId: "r", messageId: "m1", audioBase64: "AQ==", mimeType: "audio/mpeg", text: "p2", seq: 1 });
+      expect(vc.playing).toBeFalsy();
+      // Once final arrives, the full clip (all chunks) plays as one Blob.
+      vc.markFinal({ roomId: "r", messageId: "m1", authorId: "a1", body: "p1p2" });
+      expect(vc.playing?.messageId).toBe("m1");
+      expect(srcs[0]).toBe("blob:test-m1");
+      // 2 bytes (one per chunk) — proves byte concat, not the 1-byte invalid join.
+      expect(capturedBlob && capturedBlob.size).toBe(2);
+      // Ending now is correct (the whole segment was buffered).
+      (audio.onended as () => void)();
+      expect(done).toEqual(["m1"]);
+    } finally {
+      urlApi.createObjectURL = origCreate;
+      urlApi.revokeObjectURL = origRevoke;
+    }
   });
 
   it("early-starts on the first chunk when MediaSource genuinely supports the mime", () => {

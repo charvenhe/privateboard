@@ -974,7 +974,7 @@
       };
       if (next.parts.length) {
         if (!this._startMediaSource(next, audio)) {
-          audio.src = "data:" + (next.mime || "audio/mpeg") + ";base64," + next.parts.join("");
+          audio.src = this._fallbackAudioSrc(next);
         }
       } else {
         audio.src = "/api/voices/message/" + encode(next.messageId) + "/audio?ts=" + Date.now();
@@ -1005,6 +1005,26 @@
         return false;
       }
       return true;
+    }
+
+    /** Non-MSE (iOS) playback source for a complete clip. The TTS chunks are
+     *  INDEPENDENTLY base64-encoded, so `parts.join("")` produces invalid
+     *  base64 whenever a non-final chunk is padded (e.g. "AA==" + "AQ==" →
+     *  "AA==AQ==", which decodes to just the first byte) — that truncated/
+     *  corrupt clip ends early and advances the queue. Concatenate the decoded
+     *  BYTES (q.buffers, same ones the MSE path appends) into one Blob instead;
+     *  fall back to the join only if Blob/URL are unavailable. */
+    _fallbackAudioSrc(q) {
+      const URLApi = global.URL || global.webkitURL;
+      const BlobCtor = global.Blob;
+      if (BlobCtor && URLApi && q.buffers && q.buffers.length) {
+        try {
+          const blob = new BlobCtor(q.buffers, { type: q.mime || "audio/mpeg" });
+          q.objectUrl = URLApi.createObjectURL(blob);
+          return q.objectUrl;
+        } catch (_) { /* fall through to data URI */ }
+      }
+      return "data:" + (q.mime || "audio/mpeg") + ";base64," + q.parts.join("");
     }
 
     _startMediaSource(q, audio) {
