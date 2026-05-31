@@ -964,25 +964,6 @@
   .na-pick:active { background: var(--panel-2); }
   .na-pick-icon { font-size: 18px; line-height: 1; color: var(--gold); flex: 0 0 auto; }
   .na-pick-text { font-size: 14px; color: var(--ink-mid); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .na-voice-chosen {
-    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-    margin-top: 10px; padding: 10px 12px;
-    background: rgba(196,169,106,0.08); border: 1px solid rgba(196,169,106,0.2);
-    border-radius: 10px;
-  }
-  /* `[hidden]` must win over the class `display:flex` — without this the
-     empty chosen-row shows before any file is picked. */
-  .na-voice-chosen[hidden] { display: none; }
-  .na-voice-chosen-name {
-    font-size: 14px; color: var(--gold-soft);
-    flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
-  .na-voice-chosen-tag { font-size: 12px; color: var(--ink-mid); flex: 0 0 auto; }
-  .na-voice-remove {
-    flex: 0 0 auto; width: 24px; height: 24px; border-radius: 6px;
-    background: transparent; color: var(--ink-mid); font-size: 14px; line-height: 1;
-  }
-  .na-voice-remove:active { background: var(--rule); }
   .na-chips {
     display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px;
   }
@@ -993,10 +974,20 @@
     padding: 8px 10px; background: var(--panel-2); border: 1px solid var(--rule);
     border-radius: 10px; font-size: 14px; color: var(--ink);
   }
+  /* The audio/video chip currently chosen as the voice-clone source. */
+  .na-chip.is-voice { border-color: rgba(196,169,106,0.55); background: rgba(196,169,106,0.10); }
   .na-chip.is-uploading { opacity: 0.6; }
   .na-chip-icon { flex: 0 0 auto; font-size: 14px; line-height: 1; color: var(--gold); }
   .na-chip-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .na-chip-size { flex: 0 0 auto; font-size: 12px; color: var(--ink-dim); }
+  /* 🎙 toggle · only on audio/video chips; picks which file clones the voice. */
+  .na-chip-voice {
+    flex: 0 0 auto; height: 22px; padding: 0 6px; border-radius: 6px; line-height: 1;
+    background: transparent; border: 1px solid var(--rule); color: var(--ink-dim);
+    font-size: 12px; display: inline-flex; align-items: center; gap: 3px;
+  }
+  .na-chip-voice.on { border-color: var(--gold); color: var(--gold); background: rgba(196,169,106,0.12); }
+  .na-chip-voice:active { background: var(--rule); }
   .na-chip-rm {
     flex: 0 0 auto; width: 20px; height: 20px; border-radius: 5px;
     background: transparent; color: var(--ink-mid); font-size: 14px; line-height: 1;
@@ -1184,32 +1175,16 @@
         🎙 已识别到视频链接 · 将自动用作声音蒸馏源
       </div>
 
-      <!-- ─── Voice source (local audio/video → clone) ─── -->
-      <div class="na-section" id="na-voice-section">
-        <div class="na-section-label">声音来源 · 本地音视频</div>
-        <label class="na-pick" id="na-voice-pick">
-          <span class="na-pick-icon">🎙</span>
-          <span class="na-pick-text" id="na-voice-pick-text">选择音频或视频，用真人声音克隆</span>
-          <input type="file" id="na-voice-input" accept="audio/*,video/*" hidden>
-        </label>
-        <div class="na-voice-chosen" id="na-voice-chosen" hidden>
-          <span class="na-voice-chosen-name" id="na-voice-chosen-name"></span>
-          <span class="na-voice-chosen-tag">用于克隆声音</span>
-          <button type="button" class="na-voice-remove" id="na-voice-remove" aria-label="移除声音来源">✕</button>
-        </div>
-        <div class="na-section-hint">也可粘贴视频链接到上方描述；本地文件优先。</div>
-      </div>
-
-      <!-- ─── Materials (multi-file persona seed) ─── -->
+      <!-- ─── Attachments · materials + auto voice-clone source ─── -->
       <div class="na-section" id="na-materials-section">
-        <div class="na-section-label">参考材料 · 喂给角色</div>
+        <div class="na-section-label">材料与声音 · 喂给角色</div>
         <label class="na-pick" id="na-materials-pick">
           <span class="na-pick-icon">＋</span>
           <span class="na-pick-text">添加文本 / PDF / Word / 图片 / 音视频</span>
           <input type="file" id="na-materials-input" accept=".txt,.md,.pdf,.doc,.docx,text/*,image/*,audio/*,video/*" multiple hidden>
         </label>
         <div class="na-chips" id="na-materials-chips"></div>
-        <div class="na-section-hint">这些材料只用于一次性塑造角色，不会长期保存。</div>
+        <div class="na-section-hint">材料一次性塑造角色（不长期保存）。上传音视频会自动取第一个作声音克隆参考，点「🎙」可切换；也可在上方描述里粘贴视频链接。</div>
       </div>
 
       <div id="new-agent-error" style="display:none; margin-top:10px; padding:10px 14px; background:rgba(220,80,80,0.12); border:1px solid rgba(220,80,80,0.3); border-radius:10px; color:#FF8B7E; font-size:12px;"></div>
@@ -1645,7 +1620,7 @@ function goto(screen) {
   if (tabMap[screen]) {
     $$('.tabbar .tab').forEach(b => b.classList.toggle('on', b.dataset.tab === tabMap[screen]));
   }
-  if (screen === 'new-agent') { restoreAgentDraft(); wireNaExtras(); renderNaMaterials(); renderNaVoiceSource(); }
+  if (screen === 'new-agent') { restoreAgentDraft(); wireNaExtras(); renderNaMaterials(); }
   requestAnimationFrame(syncBottomChromeHeights);
   window.scrollTo(0, 0);
   persistMobileView(screen);
@@ -2385,7 +2360,10 @@ window.addEventListener('resize', () => requestAnimationFrame(layoutBoardroomSea
 // TDZ would throw and abort the rest of the inline script. The render/handler
 // functions are hoisted and close over these bindings.
 let naMaterials = [];
-let naVoiceSource = null;
+// `_key` of the material chosen as the voice-clone source. null = auto (the
+// first audio/video material). A single unified uploader feeds both the
+// persona seed AND voice cloning — no separate voice control.
+let naVoiceKey = null;
 const NA_KIND_ICON = { text: '▤', doc: '▦', image: '◧', audio: '🎙', video: '▷' };
 
 (function applyDeepLink() {
@@ -5397,15 +5375,14 @@ function onNewAgentDescInput(value) {
   hint.style.display = VOICE_URL_RE.test(String(value || '')) ? 'flex' : 'none';
 }
 
-// ── new agent v2 · materials + local voice source ─────────
+// ── new agent v2 · unified attachments (materials + voice source) ─────────
 // In-memory only (a one-time persona seed, never persisted as a draft).
 // `naMaterials` holds the upload descriptors {id,kind,filePath,name,mime,size}
-// returned by POST /api/agents/materials/upload. `naVoiceSource` holds the
-// descriptor of the audio/video chosen specifically as the voice-clone
-// source; it is ALSO merged into the materials list (deduped by filePath) on
-// submit so the server can transcribe it as seed material.
-// (`naMaterials` / `naVoiceSource` / `NA_KIND_ICON` are declared earlier,
-// above applyDeepLink, so a parse-time deep-link goto('new-agent') doesn't TDZ.)
+// returned by POST /api/agents/materials/upload. ONE uploader feeds both the
+// persona seed AND voice cloning: the chosen (or first) audio/video material
+// is the clone source — see naEffectiveVoiceMat / naVoiceKey.
+// (`naMaterials` / `naVoiceKey` / `NA_KIND_ICON` are declared earlier, above
+// applyDeepLink, so a parse-time deep-link goto('new-agent') doesn't TDZ.)
 function naFmtBytes(n) {
   const b = Number(n) || 0;
   if (b < 1024) return b + ' B';
@@ -5439,83 +5416,65 @@ async function naUploadMaterial(file) {
   if (!list.length) throw new Error('上传无返回');
   return list[0];
 }
+// Is this material an audio/video file (a candidate voice-clone source)?
+function naIsAV(m) { return m && (m.kind === 'audio' || m.kind === 'video'); }
+// The material whose voice clones the agent: the user's explicit pick
+// (naVoiceKey) if it's still a valid AV material, else the FIRST AV material.
+function naEffectiveVoiceMat() {
+  if (naVoiceKey) {
+    const picked = naMaterials.find((m) => m._key === naVoiceKey && naIsAV(m) && !m.pending && m.filePath);
+    if (picked) return picked;
+  }
+  return naMaterials.find((m) => naIsAV(m) && !m.pending && m.filePath) || null;
+}
 function renderNaMaterials() {
   const wrap = document.getElementById('na-materials-chips');
   if (!wrap) return;
+  const voiceMat = naEffectiveVoiceMat();
   wrap.innerHTML = naMaterials.map((m) => {
     const icon = NA_KIND_ICON[m.kind] || '▤';
     const uploading = m.pending ? ' is-uploading' : '';
+    const isVoice = !!voiceMat && m._key === voiceMat._key;
     const size = (typeof m.size === 'number' && m.size > 0) ? `<span class="na-chip-size">${naFmtBytes(m.size)}</span>` : '';
+    // Audio/video chips carry a 🎙 toggle to choose the clone source; the
+    // active one reads "🎙 声音源", the others just "🎙".
+    const voiceBtn = (naIsAV(m) && !m.pending)
+      ? `<button type="button" class="na-chip-voice${isVoice ? ' on' : ''}" data-na-voice="${escapeHtml(m._key)}" title="${isVoice ? '当前声音克隆参考' : '设为声音克隆参考'}">🎙${isVoice ? ' 声音源' : ''}</button>`
+      : '';
     const rm = m.pending ? '' : `<button type="button" class="na-chip-rm" data-na-mat-rm="${escapeHtml(m._key)}" aria-label="移除">✕</button>`;
-    return `<span class="na-chip${uploading}">
+    return `<span class="na-chip${uploading}${isVoice ? ' is-voice' : ''}">
       <span class="na-chip-icon">${icon}</span>
       <span class="na-chip-name">${escapeHtml(m.name || '文件')}</span>
-      ${size}${rm}
+      ${size}${voiceBtn}${rm}
     </span>`;
   }).join('');
   wrap.querySelectorAll('[data-na-mat-rm]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const key = btn.getAttribute('data-na-mat-rm');
       naMaterials = naMaterials.filter((m) => m._key !== key);
+      if (naVoiceKey === key) naVoiceKey = null; // fall back to auto
+      renderNaMaterials();
+    });
+  });
+  wrap.querySelectorAll('[data-na-voice]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      naVoiceKey = btn.getAttribute('data-na-voice');
       renderNaMaterials();
     });
   });
 }
-function renderNaVoiceSource() {
-  const chosen = document.getElementById('na-voice-chosen');
-  const pick = document.getElementById('na-voice-pick');
-  const nameEl = document.getElementById('na-voice-chosen-name');
-  const pickText = document.getElementById('na-voice-pick-text');
-  if (!chosen || !pick) return;
-  if (naVoiceSource) {
-    chosen.hidden = false;
-    pick.style.display = 'none';
-    if (nameEl) nameEl.textContent = naVoiceSource.pending ? (naVoiceSource.name + ' · 上传中…') : naVoiceSource.name;
-  } else {
-    chosen.hidden = true;
-    pick.style.display = '';
-    if (pickText) pickText.textContent = '选择音频或视频，用真人声音克隆';
-  }
-}
 function resetNaExtras() {
   naMaterials = [];
-  naVoiceSource = null;
-  const vi = document.getElementById('na-voice-input');
+  naVoiceKey = null;
   const mi = document.getElementById('na-materials-input');
-  if (vi) vi.value = '';
   if (mi) mi.value = '';
   renderNaMaterials();
-  renderNaVoiceSource();
 }
 function wireNaExtras() {
-  const voiceInput = document.getElementById('na-voice-input');
   const matInput = document.getElementById('na-materials-input');
-  const voiceRemove = document.getElementById('na-voice-remove');
   const err = document.getElementById('new-agent-error');
   const showErr = (m) => { if (err) { err.textContent = m; err.style.display = 'block'; } };
 
-  if (voiceInput && !voiceInput.dataset.wired) {
-    voiceInput.dataset.wired = '1';
-    voiceInput.addEventListener('change', async () => {
-      const f = voiceInput.files && voiceInput.files[0];
-      voiceInput.value = '';
-      if (!f) return;
-      naVoiceSource = { name: f.name, mime: f.type, size: f.size, pending: true };
-      renderNaVoiceSource();
-      try {
-        const desc = await naUploadMaterial(f);
-        naVoiceSource = { ...desc, pending: false };
-      } catch (e) {
-        naVoiceSource = null;
-        showErr('声音文件上传失败：' + e.message);
-      }
-      renderNaVoiceSource();
-    });
-  }
-  if (voiceRemove && !voiceRemove.dataset.wired) {
-    voiceRemove.dataset.wired = '1';
-    voiceRemove.addEventListener('click', () => { naVoiceSource = null; renderNaVoiceSource(); });
-  }
   if (matInput && !matInput.dataset.wired) {
     matInput.dataset.wired = '1';
     matInput.addEventListener('change', async () => {
@@ -5554,10 +5513,6 @@ async function submitNewAgent() {
   }
   // Block submit while any upload is still in flight so we don't send a
   // half-formed descriptor list (missing filePath) to the backend.
-  if (naVoiceSource && naVoiceSource.pending) {
-    if (err) { err.textContent = '声音文件还在上传，请稍候'; err.style.display = 'block'; }
-    return;
-  }
   if (naMaterials.some((m) => m.pending)) {
     if (err) { err.textContent = '材料还在上传，请稍候'; err.style.display = 'block'; }
     return;
@@ -5568,23 +5523,20 @@ async function submitNewAgent() {
   if (btn) { btn.textContent = '启动中...'; btn.disabled = true; btn.style.opacity = '0.5'; }
   try {
     // Assemble the materials list · strip client-only bookkeeping fields
-    // (_key, pending) so only the backend descriptor shape goes over the
-    // wire. A local voice source is folded into materials too (deduped by
-    // filePath) so the server can transcribe it as persona seed material.
+    // (_key, pending) so only the backend descriptor shape goes over the wire.
     const toDescriptor = (m) => ({ id: m.id, kind: m.kind, filePath: m.filePath, name: m.name, mime: m.mime, size: m.size });
     const materials = naMaterials.filter((m) => !m.pending && m.filePath).map(toDescriptor);
-    if (naVoiceSource && naVoiceSource.filePath && !materials.some((m) => m.filePath === naVoiceSource.filePath)) {
-      materials.push(toDescriptor(naVoiceSource));
-    }
-    // Shared start-payload builder · only attaches voiceSourceUrl when a video
-    // link was actually extracted (matches PC). A local file in naVoiceSource
-    // takes priority — both can be present and the backend chooses the local
-    // file when voiceSource is supplied.
+    // Voice clone source · the first (or user-chosen) audio/video material.
+    // It's already in `materials`, so we just point voiceSource at its path —
+    // the server clones from it AND transcribes it as seed material.
+    const voiceMat = naEffectiveVoiceMat();
+    // Shared start-payload builder · voiceSourceUrl (pasted link) still works;
+    // a local AV material takes priority server-side when voiceSource is set.
     const payload = window.AgentRuntime.buildPersonaStartPayload(description, {
       locale: 'zh',
       voiceSourceUrl: urlMatch ? urlMatch[0] : '',
       materials,
-      voiceSource: (naVoiceSource && naVoiceSource.filePath) ? { filePath: naVoiceSource.filePath } : null,
+      voiceSource: (voiceMat && voiceMat.filePath) ? { filePath: voiceMat.filePath } : null,
     });
     const data = await agentApi.generatePersona(payload);
     appState.activeBuildJobId = data.jobId || data.id;

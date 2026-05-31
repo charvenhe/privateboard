@@ -349,16 +349,12 @@
       // would leak listeners + miss freshly-painted inputs. Doc-level
       // delegation keeps the upload handlers stable across repaints.
       document.addEventListener("change", (e) => {
-        if (e.target.closest("[data-agent-voice-input]")) {
-          this.onAgentVoiceSourcePick(e.target);
-          return;
-        }
         if (e.target.closest("[data-agent-materials-input]")) {
           this.onAgentMaterialsPick(e.target);
           return;
         }
       });
-      // New-agent v2 · chip / voice removal delegate.
+      // New-agent v2 · chip removal + voice-source toggle delegate.
       document.addEventListener("click", (e) => {
         const rmMat = e.target.closest("[data-agent-mat-rm]");
         if (rmMat) {
@@ -366,9 +362,10 @@
           this.removeAgentMaterial(rmMat.getAttribute("data-agent-mat-rm"));
           return;
         }
-        if (e.target.closest("[data-agent-voice-remove]")) {
+        const voiceKey = e.target.closest("[data-agent-voice-key]");
+        if (voiceKey) {
           e.preventDefault();
-          this.removeAgentVoiceSource();
+          this.setAgentVoiceKey(voiceKey.getAttribute("data-agent-voice-key"));
           return;
         }
       });
@@ -9626,7 +9623,7 @@
           // repaint, which blows away the chip / voice-source DOM. Repaint
           // the in-memory extras state back in so uploads picked before a
           // repaint (model-toggle click, locale change, etc.) survive.
-          try { this._renderAgentMaterials(); this._renderAgentVoiceSource(); } catch (_) { /* */ }
+          try { this._renderAgentMaterials(); } catch (_) { /* */ }
           // Hire-a-known-mind portraits · upgrade the 2D placeholders
           // to deterministic 3D voxel renders. Fire-and-forget · the
           // hydrator lazy-loads three.js + avatar-3d.js on first use,
@@ -13097,28 +13094,14 @@
                  via buildPersonaStartPayload (materials + voiceSource). -->
             <div class="ag-extras">
               <div class="ag-extra">
-                <div class="ag-extra-label">Voice source · local audio/video</div>
-                <label class="ag-pick" data-agent-voice-pick>
-                  <span class="ag-pick-icon">🎙</span>
-                  <span class="ag-pick-text" data-agent-voice-pick-text>Pick an audio or video file to clone the voice</span>
-                  <input type="file" accept="audio/*,video/*" hidden data-agent-voice-input>
-                </label>
-                <div class="ag-voice-chosen" data-agent-voice-chosen hidden>
-                  <span class="ag-voice-chosen-name" data-agent-voice-chosen-name></span>
-                  <span class="ag-voice-chosen-tag">used to clone the voice</span>
-                  <button type="button" class="ag-voice-remove" data-agent-voice-remove aria-label="Remove voice source">✕</button>
-                </div>
-                <div class="ag-extra-hint">Or paste a video link into the prompt above; a local file takes priority.</div>
-              </div>
-              <div class="ag-extra">
-                <div class="ag-extra-label">Materials · seed the persona</div>
+                <div class="ag-extra-label">Materials &amp; voice · seed the persona</div>
                 <label class="ag-pick" data-agent-materials-pick>
                   <span class="ag-pick-icon">＋</span>
                   <span class="ag-pick-text">Add text / PDF / Word / images / audio / video</span>
                   <input type="file" accept=".txt,.md,.pdf,.doc,.docx,text/*,image/*,audio/*,video/*" multiple hidden data-agent-materials-input>
                 </label>
                 <div class="ag-chips" data-agent-materials-chips></div>
-                <div class="ag-extra-hint">A one-time seed for this build · not kept as a knowledge base.</div>
+                <div class="ag-extra-hint">A one-time seed for this build · not kept as a knowledge base. The first audio/video you add clones the voice automatically — click 🎙 to switch. Or paste a video link into the prompt above.</div>
               </div>
             </div>
 
@@ -13348,15 +13331,15 @@
      *  surface a retry card. */
     AGENT_GEN_TIMEOUT_MS: 5 * 60_000,
 
-    /* ─── New-agent v2 · local voice source + persona materials ───
+    /* ─── New-agent v2 · unified attachments (materials + voice) ───
        In-memory only (a one-time persona seed, not a persisted draft).
-       `_agentMaterials` holds upload descriptors
-       {id,kind,filePath,name,mime,size} returned by
-       /api/agents/materials/upload; `_agentVoiceSource` holds the
-       descriptor chosen as the local voice-clone source (also folded
-       into materials on submit, deduped by filePath). */
+       `_agentMaterials` holds upload descriptors {id,kind,filePath,name,
+       mime,size} from /api/agents/materials/upload. ONE uploader feeds
+       both the persona seed AND voice cloning: the chosen (or first)
+       audio/video material is the clone source — see _agentVoiceKey /
+       _agentEffectiveVoiceMat. */
     _agentMaterials: [],
-    _agentVoiceSource: null,
+    _agentVoiceKey: null,
     _AGENT_KIND_ICON: { text: "▤", doc: "▦", image: "◧", audio: "🎙", video: "▷" },
 
     _fmtBytes(n) {
@@ -13390,61 +13373,43 @@
       if (!list.length) throw new Error("upload returned no descriptor");
       return list[0];
     },
+    _agentIsAV(m) { return !!m && (m.kind === "audio" || m.kind === "video"); },
+    /** The material whose voice clones the agent: the user's explicit pick
+     *  (_agentVoiceKey) if still a valid AV material, else the FIRST AV one. */
+    _agentEffectiveVoiceMat() {
+      if (this._agentVoiceKey) {
+        const picked = this._agentMaterials.find((m) =>
+          m._key === this._agentVoiceKey && this._agentIsAV(m) && !m.pending && m.filePath);
+        if (picked) return picked;
+      }
+      return this._agentMaterials.find((m) => this._agentIsAV(m) && !m.pending && m.filePath) || null;
+    },
     _renderAgentMaterials() {
       const wrap = document.querySelector("[data-agent-materials-chips]");
       if (!wrap) return;
+      const voiceMat = this._agentEffectiveVoiceMat();
       wrap.innerHTML = this._agentMaterials.map((m) => {
         const icon = this._AGENT_KIND_ICON[m.kind] || "▤";
         const uploading = m.pending ? " is-uploading" : "";
+        const isVoice = !!voiceMat && m._key === voiceMat._key;
         const size = (typeof m.size === "number" && m.size > 0)
           ? `<span class="ag-chip-size">${this.escape(this._fmtBytes(m.size))}</span>` : "";
+        // Audio/video chips carry a 🎙 toggle to pick the clone source.
+        const voiceBtn = (this._agentIsAV(m) && !m.pending)
+          ? `<button type="button" class="ag-chip-voice${isVoice ? " on" : ""}" data-agent-voice-key="${this.escape(m._key)}" title="${isVoice ? "Voice clone source" : "Use as voice clone source"}">🎙${isVoice ? " voice" : ""}</button>`
+          : "";
         const rm = m.pending ? ""
           : `<button type="button" class="ag-chip-rm" data-agent-mat-rm="${this.escape(m._key)}" aria-label="Remove">✕</button>`;
-        return `<span class="ag-chip${uploading}">
+        return `<span class="ag-chip${uploading}${isVoice ? " is-voice" : ""}">
           <span class="ag-chip-icon">${icon}</span>
           <span class="ag-chip-name">${this.escape(m.name || "file")}</span>
-          ${size}${rm}
+          ${size}${voiceBtn}${rm}
         </span>`;
       }).join("");
     },
-    _renderAgentVoiceSource() {
-      const chosen = document.querySelector("[data-agent-voice-chosen]");
-      const pick = document.querySelector("[data-agent-voice-pick]");
-      const nameEl = document.querySelector("[data-agent-voice-chosen-name]");
-      const pickText = document.querySelector("[data-agent-voice-pick-text]");
-      if (!chosen || !pick) return;
-      if (this._agentVoiceSource) {
-        chosen.hidden = false;
-        pick.style.display = "none";
-        if (nameEl) {
-          nameEl.textContent = this._agentVoiceSource.pending
-            ? (this._agentVoiceSource.name + " · uploading…")
-            : this._agentVoiceSource.name;
-        }
-      } else {
-        chosen.hidden = true;
-        pick.style.display = "";
-        if (pickText) pickText.textContent = "Pick an audio or video file to clone the voice";
-      }
-    },
-    async onAgentVoiceSourcePick(input) {
-      const f = input && input.files && input.files[0];
-      if (input) input.value = "";
-      if (!f) return;
-      this._agentVoiceSource = { name: f.name, mime: f.type, size: f.size, pending: true };
-      this._renderAgentVoiceSource();
-      try {
-        const desc = await this._uploadMaterial(f);
-        this._agentVoiceSource = { ...desc, pending: false };
-      } catch (e) {
-        this._agentVoiceSource = null;
-        alert("Voice file upload failed: " + (e && e.message ? e.message : e));
-      }
-      this._renderAgentVoiceSource();
-    },
-    removeAgentVoiceSource() {
-      this._agentVoiceSource = null;
-      this._renderAgentVoiceSource();
+    setAgentVoiceKey(key) {
+      this._agentVoiceKey = key;
+      this._renderAgentMaterials();
     },
     async onAgentMaterialsPick(input) {
       const files = Array.from((input && input.files) || []);
@@ -13469,28 +13434,26 @@
     },
     removeAgentMaterial(key) {
       this._agentMaterials = this._agentMaterials.filter((m) => m._key !== key);
+      if (this._agentVoiceKey === key) this._agentVoiceKey = null; // fall back to auto
       this._renderAgentMaterials();
     },
     /** Assemble the submit-ready { materials, voiceSource } pair from the
-     *  in-memory state · strips client-only bookkeeping fields and folds
-     *  the local voice source into materials (deduped by filePath). */
+     *  in-memory state · strips client-only bookkeeping fields. The voice
+     *  source is the chosen (or first) audio/video material, already in the
+     *  list, so we just point voiceSource at its path. */
     _agentExtrasForSubmit() {
       const toDescriptor = (m) => ({ id: m.id, kind: m.kind, filePath: m.filePath, name: m.name, mime: m.mime, size: m.size });
       const materials = this._agentMaterials.filter((m) => !m.pending && m.filePath).map(toDescriptor);
-      const vs = this._agentVoiceSource;
-      if (vs && vs.filePath && !materials.some((m) => m.filePath === vs.filePath)) {
-        materials.push(toDescriptor(vs));
-      }
+      const voiceMat = this._agentEffectiveVoiceMat();
       return {
         materials,
-        voiceSource: (vs && vs.filePath) ? { filePath: vs.filePath } : null,
+        voiceSource: (voiceMat && voiceMat.filePath) ? { filePath: voiceMat.filePath } : null,
       };
     },
     _resetAgentExtras() {
       this._agentMaterials = [];
-      this._agentVoiceSource = null;
+      this._agentVoiceKey = null;
       this._renderAgentMaterials();
-      this._renderAgentVoiceSource();
     },
 
     async submitAgentComposer() {
@@ -13500,10 +13463,9 @@
         if (ta) ta.focus();
         return;
       }
-      // Block submit while a voice-source / materials upload is still in
-      // flight so we never send a half-formed descriptor (missing filePath).
-      if ((this._agentVoiceSource && this._agentVoiceSource.pending)
-          || this._agentMaterials.some((m) => m.pending)) {
+      // Block submit while a materials upload is still in flight so we never
+      // send a half-formed descriptor (missing filePath).
+      if (this._agentMaterials.some((m) => m.pending)) {
         alert("Files are still uploading — please wait a moment.");
         return;
       }

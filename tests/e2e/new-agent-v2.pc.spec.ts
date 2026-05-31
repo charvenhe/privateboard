@@ -1,11 +1,11 @@
 /**
- * New-Agent v2 (PC) e2e — local voice-source upload + materials uploads in the
- * new-agent composer (`public/index.html` + `public/app.js`). Verifies the
- * extras render, a real upload to `/api/agents/materials/upload` produces a
- * chip, and no chip overflows its container at desktop width.
+ * New-Agent v2 (PC) e2e — ONE unified attachments uploader in the new-agent
+ * composer (`public/index.html` + `public/app.js`). Verifies the extras render,
+ * a real upload to `/api/agents/materials/upload` produces a chip, an audio
+ * material auto-becomes the voice source (🎙), and no chip overflows its
+ * container at desktop width.
  *
- * Runs under the `pc-chromium` project (1440×900). The dev server must be up
- * on :3030 (the config has no webServer).
+ * Runs under the `pc-chromium` project (1440×900). Dev server up on :3030.
  *
  *     npx playwright test new-agent-v2.pc
  */
@@ -18,9 +18,14 @@ const TXT = {
   mimeType: "text/plain",
   buffer: Buffer.from("A contrarian value investor who distrusts hype and asks for unit economics."),
 };
+const MP3 = {
+  name: "keynote-clip.mp3",
+  mimeType: "audio/mpeg",
+  buffer: Buffer.from("ID3 fake mp3 bytes for upload"),
+};
 
 test.describe("new-agent v2 · PC", () => {
-  test("composer extras render, upload yields a chip, no overflow", async ({ page }) => {
+  test("unified uploader: chips render, audio auto-becomes voice source, no overflow", async ({ page }) => {
     await page.goto(`${BASE}/`);
     // The trigger is a mask/::before icon button (zero-box to Playwright's
     // visibility check) wired through a document-level click delegate, so
@@ -30,9 +35,14 @@ test.describe("new-agent v2 · PC", () => {
     await expect(page.locator(".ag-extras")).toBeVisible();
 
     await page.setInputFiles("[data-agent-materials-input]", TXT);
-    const chip = page.locator("[data-agent-materials-chips] .ag-chip").first();
-    await expect(chip).toContainText("persona-brief.txt");
+    await expect(page.locator("[data-agent-materials-chips] .ag-chip").first()).toContainText("persona-brief.txt");
     await expect(page.locator("[data-agent-materials-chips] .ag-chip.is-uploading")).toHaveCount(0, { timeout: 10_000 });
+
+    await page.setInputFiles("[data-agent-materials-input]", MP3);
+    await expect(page.locator("[data-agent-materials-chips] .ag-chip.is-uploading")).toHaveCount(0, { timeout: 10_000 });
+    const audioChip = page.locator("[data-agent-materials-chips] .ag-chip", { hasText: "keynote-clip.mp3" });
+    await expect(audioChip).toHaveClass(/(^|\s)is-voice(\s|$)/);
+    await expect(audioChip.locator(".ag-chip-voice.on")).toBeVisible();
 
     const chipOverflow = await page.evaluate(() => {
       const wrap = document.querySelector("[data-agent-materials-chips]");

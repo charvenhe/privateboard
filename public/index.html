@@ -12367,43 +12367,6 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .ag-voice-chosen {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    flex-wrap: wrap;
-    margin-top: 10px;
-    padding: 10px 12px;
-    background: rgba(201, 164, 107, 0.08);
-    border: 1px solid rgba(201, 164, 107, 0.25);
-    border-radius: 8px;
-  }
-  /* `[hidden]` must beat the class `display:flex` (else the empty
-     chosen-row shows before a voice file is picked). */
-  .ag-voice-chosen[hidden] { display: none; }
-  .ag-voice-chosen-name {
-    font-size: 14px;
-    color: var(--text);
-    flex: 1 1 auto;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .ag-voice-chosen-tag { font-size: 12px; color: var(--text-soft); flex: 0 0 auto; }
-  .ag-voice-remove {
-    flex: 0 0 auto;
-    width: 24px;
-    height: 24px;
-    border-radius: 5px;
-    background: transparent;
-    border: none;
-    color: var(--text-soft);
-    font-size: 14px;
-    line-height: 1;
-    cursor: pointer;
-  }
-  .ag-voice-remove:hover { background: rgba(255,255,255,0.06); color: var(--text); }
   .ag-chips {
     display: flex;
     flex-wrap: wrap;
@@ -12424,10 +12387,30 @@
     font-size: 14px;
     color: var(--text);
   }
+  /* The audio/video chip currently chosen as the voice-clone source. */
+  .ag-chip.is-voice { border-color: rgba(201, 164, 107, 0.55); background: rgba(201, 164, 107, 0.10); }
   .ag-chip.is-uploading { opacity: 0.55; }
   .ag-chip-icon { flex: 0 0 auto; font-size: 14px; line-height: 1; color: var(--lime); }
   .ag-chip-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .ag-chip-size { flex: 0 0 auto; font-size: 12px; color: var(--text-dim); }
+  /* 🎙 toggle · only on audio/video chips; picks which file clones the voice. */
+  .ag-chip-voice {
+    flex: 0 0 auto;
+    height: 22px;
+    padding: 0 6px;
+    border-radius: 5px;
+    line-height: 1;
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--text-dim);
+    font-size: 12px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+  }
+  .ag-chip-voice.on { border-color: rgba(201, 164, 107, 0.7); color: var(--lime); background: rgba(201, 164, 107, 0.12); }
+  .ag-chip-voice:hover { background: rgba(255,255,255,0.06); }
   .ag-chip-rm {
     flex: 0 0 auto;
     width: 20px;
