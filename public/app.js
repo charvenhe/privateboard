@@ -13480,7 +13480,12 @@
       this.clearAgentComposerDraft();
       this.clearAgentComposerVoiceUrl();
       const mode = this.loadAgentBuilderMode();
-      if (mode === "full") {
+      // Uploaded materials / a voice source only thread through the FULL
+      // persona build (the quick "signal" spec path ignores them). So if the
+      // user attached anything, force the full path — otherwise their files
+      // would be silently dropped.
+      const hasExtras = this._agentMaterials.some((m) => !m.pending && m.filePath);
+      if (mode === "full" || hasExtras) {
         await this.startFullPersonaBuild(description);
       } else {
         await this._runAgentSpecGeneration(description);

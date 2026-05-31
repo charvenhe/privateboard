@@ -2365,6 +2365,10 @@ let naMaterials = [];
 // persona seed AND voice cloning — no separate voice control.
 let naVoiceKey = null;
 const NA_KIND_ICON = { text: '▤', doc: '▦', image: '◧', audio: '🎙', video: '▷' };
+// Voice-link detector · also hoisted above applyDeepLink: a deep-link to
+// new-agent with a saved draft calls onNewAgentDescInput → reads this at parse
+// time, so declaring it lower would TDZ-abort the inline script.
+const VOICE_URL_RE = /https?:\/\/(?:www\.)?(?:youtube\.com|youtu\.be|bilibili\.com|b23\.tv|vimeo\.com|x\.com|twitter\.com|weibo\.com|tiktok\.com|douyin\.com|xiaohongshu\.com|xhslink\.com)\/\S+/i;
 
 (function applyDeepLink() {
   const params = new URLSearchParams(location.search);
@@ -5367,7 +5371,9 @@ openSheet = function(name) {
 };
 
 // ── new agent build ───────────────────────────────────────
-const VOICE_URL_RE = /https?:\/\/(?:www\.)?(?:youtube\.com|youtu\.be|bilibili\.com|b23\.tv|vimeo\.com|x\.com|twitter\.com|weibo\.com|tiktok\.com|douyin\.com|xiaohongshu\.com|xhslink\.com)\/\S+/i;
+// (VOICE_URL_RE is declared above applyDeepLink — see that block — because a
+// `?screen=new-agent` deep-link with a saved draft calls onNewAgentDescInput
+// at parse time, which reads it; a TDZ here aborted the whole inline script.)
 function onNewAgentDescInput(value) {
   saveAgentDraft(String(value || ''));
   const hint = document.getElementById('new-agent-url-hint');
