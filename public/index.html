@@ -12378,6 +12378,9 @@
     border: 1px solid rgba(201, 164, 107, 0.25);
     border-radius: 8px;
   }
+  /* `[hidden]` must beat the class `display:flex` (else the empty
+     chosen-row shows before a voice file is picked). */
+  .ag-voice-chosen[hidden] { display: none; }
   .ag-voice-chosen-name {
     font-size: 14px;
     color: var(--text);

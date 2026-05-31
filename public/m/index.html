@@ -970,6 +970,9 @@
     background: rgba(196,169,106,0.08); border: 1px solid rgba(196,169,106,0.2);
     border-radius: 10px;
   }
+  /* `[hidden]` must win over the class `display:flex` — without this the
+     empty chosen-row shows before any file is picked. */
+  .na-voice-chosen[hidden] { display: none; }
   .na-voice-chosen-name {
     font-size: 14px; color: var(--gold-soft);
     flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -996,7 +999,7 @@
   .na-chip-size { flex: 0 0 auto; font-size: 12px; color: var(--ink-dim); }
   .na-chip-rm {
     flex: 0 0 auto; width: 20px; height: 20px; border-radius: 5px;
-    background: transparent; color: var(--ink-mid); font-size: 13px; line-height: 1;
+    background: transparent; color: var(--ink-mid); font-size: 14px; line-height: 1;
   }
   .na-chip-rm:active { background: var(--rule); }
 </style>
