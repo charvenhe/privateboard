@@ -867,7 +867,12 @@
         endTime: null,
       });
       q.totalCaptionBytes += bytes;
-      if (fresh && this.playOnFirstChunk && this.useMediaSource && !q.enqueued) {
+      // Only early-start (before `final`) when MediaSource can genuinely stream this
+      // mime: MSE keeps appending later chunks to the same buffer and only ends on
+      // `final`. Without usable MSE the playback path is a data: URI built from the
+      // chunks present right now, so starting early on a partial set truncates the
+      // segment under high latency. There we wait for markFinal() to enqueue.
+      if (fresh && this.playOnFirstChunk && !q.enqueued && this._mseUsable(q.mime)) {
         q.enqueued = true;
         q.playState = "queued";
         this.queue.push(q);
@@ -943,7 +948,10 @@
     pump() {
       if (!this.unlocked || !this.audio || this.playing) return;
       const next = this.queue[0];
-      const canStartStreaming = !!(this.playOnFirstChunk && this.useMediaSource && next && next.parts && next.parts.length);
+      const canStartStreaming = !!(
+        this.playOnFirstChunk && next && next.parts && next.parts.length
+        && this._mseUsable(next.mime)
+      );
       if (!next || (!next.final && !canStartStreaming)) return;
       this.queue.shift();
       this.playing = next;
@@ -982,6 +990,21 @@
           this.playing = null;
         });
       }
+    }
+
+    _mseUsable(mime) {
+      // True only when MediaSource can genuinely stream this mime in THIS runtime.
+      // iOS Safari exposes no MediaSource (or returns false from isTypeSupported for
+      // audio/mpeg), so this is false there and we must wait for `final` instead of
+      // early-starting on a partial chunk set. Mirror the guards in _startMediaSource.
+      const MediaSourceCtor = global.MediaSource || global.WebKitMediaSource;
+      const URLApi = global.URL || global.webkitURL;
+      if (!this.useMediaSource || !MediaSourceCtor || !URLApi) return false;
+      const type = mime || "audio/mpeg";
+      if (typeof MediaSourceCtor.isTypeSupported === "function" && !MediaSourceCtor.isTypeSupported(type)) {
+        return false;
+      }
+      return true;
     }
 
     _startMediaSource(q, audio) {
