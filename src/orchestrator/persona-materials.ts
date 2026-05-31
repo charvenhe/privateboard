@@ -15,10 +15,12 @@
  *     dump of large PDFs can't blow past the persona prompt budget.
  *
  * Materials are a one-time seed · nothing here is persisted beyond the
- * build. The route stashes the uploads in tmp (mirroring
- * /api/voice-clone/upload); the OS tmp reaper cleans them up.
+ * build. The route stashes the uploads under a confined, private upload
+ * root (see src/utils/upload-root.ts) and best-effort removes the
+ * consumed batch dirs after the build; a boot/TTL sweep reaps any leak.
+ * Transcoded audio scratch is created lazily and removed in a finally.
  */
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
@@ -102,10 +104,56 @@ export const PER_FILE_TEXT_CAP = 4_000;
  *  large images (they'd bloat the prompt and most vision models reject
  *  them anyway). Degrades to a "noted" entry instead. */
 export const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+/** Raw-file ceiling for text/markdown · enforced via statSync BEFORE
+ *  the whole file is read into memory. A 4000-char cap is applied after;
+ *  this just stops a multi-MB "text" file from being slurped first. */
+export const MAX_TEXT_BYTES = 2 * 1024 * 1024;
+/** Raw-file ceiling for PDF/DOCX · enforced before the buffer is read +
+ *  handed to pdf-parse / mammoth. Above this the file degrades to a
+ *  "noted" entry rather than risking a slow / memory-heavy parse. */
+export const MAX_DOC_BYTES = 25 * 1024 * 1024;
+/** Wall-clock guard on a single document parse (pdf-parse / mammoth) so
+ *  a crafted file can't hang the build. The parse loses to the timeout
+ *  and the file degrades to "noted". */
+export const DOC_PARSE_TIMEOUT_MS = 30_000;
+/** Wall-clock guard on a single transcript (ffmpeg normalize + ASR). */
+export const TRANSCRIBE_TIMEOUT_MS = 5 * 60_000;
+
+/** Race a promise against a timeout · rejects with a timeout error when
+ *  the work doesn't settle in time so a malicious / pathological input
+ *  can't stall the whole build. */
+async function withTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const guard = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  try {
+    return await Promise.race([work, guard]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/** statSync-equivalent size probe · returns the byte size, or null when
+ *  the file is missing / unreadable (caller degrades to "noted"). */
+async function fileSize(filePath: string): Promise<number | null> {
+  try {
+    const info = await stat(filePath);
+    return info.isFile() ? info.size : null;
+  } catch {
+    return null;
+  }
+}
 
 /** Read a plain-text / markdown file. Throws on read failure (caller
- *  catches and degrades). */
+ *  catches and degrades). Rejects oversized files BEFORE the read so a
+ *  multi-MB "text" file can't be slurped whole just to clip 4000 chars. */
 async function extractText(filePath: string): Promise<string> {
+  const size = await fileSize(filePath);
+  if (size === null) throw new Error("file is missing or not a regular file");
+  if (size > MAX_TEXT_BYTES) {
+    throw new Error(`text file too large (${size} bytes > ${MAX_TEXT_BYTES})`);
+  }
   const raw = await readFile(filePath, "utf8");
   // Strip NUL bytes (misencoded uploads) + a leading UTF-8 BOM, then
   // trim. Interior whitespace is preserved — it carries structure.
@@ -116,13 +164,19 @@ async function extractText(filePath: string): Promise<string> {
  *  are loaded lazily so a build with no documents never pays the import
  *  cost. Throws on failure (caller degrades to "noted"). */
 async function extractDoc(filePath: string, name: string): Promise<string> {
+  const size = await fileSize(filePath);
+  if (size === null) throw new Error("file is missing or not a regular file");
+  if (size > MAX_DOC_BYTES) {
+    throw new Error(`document too large (${size} bytes > ${MAX_DOC_BYTES})`);
+  }
   const ext = extname(name || filePath).toLowerCase();
   const buf = await readFile(filePath);
   if (ext === ".pdf" || isPdfMagic(buf)) {
     const { PDFParse } = await import("pdf-parse");
     const parser = new PDFParse({ data: new Uint8Array(buf) });
     try {
-      const res = await parser.getText();
+      // Timeout guard · a crafted PDF can't hang the build forever.
+      const res = await withTimeout(parser.getText(), DOC_PARSE_TIMEOUT_MS, "pdf parse");
       return (res.text || "").trim();
     } finally {
       await parser.destroy().catch(() => undefined);
@@ -130,7 +184,11 @@ async function extractDoc(filePath: string, name: string): Promise<string> {
   }
   // docx (and other Office Open XML word docs) → mammoth raw text.
   const mammoth = (await import("mammoth")).default;
-  const res = await mammoth.extractRawText({ buffer: buf });
+  const res = await withTimeout(
+    mammoth.extractRawText({ buffer: buf }),
+    DOC_PARSE_TIMEOUT_MS,
+    "docx parse",
+  );
   return (res.value || "").trim();
 }
 
@@ -158,11 +216,21 @@ async function extractTranscript(
 
   // Normalize / extract the audio track to a clean mono mp3 the ASR
   // endpoint accepts. normalizeAudio demuxes video containers too, so
-  // the same call covers both audio and video inputs.
+  // the same call covers both audio and video inputs. Both steps run
+  // under a wall-clock guard so a malicious media file can't stall the
+  // build indefinitely.
   const normPath = `${workDir}/material-audio-${Date.now()}.mp3`;
-  await normalizeAudio({ inputPath: filePath, outputPath: normPath, signal });
+  await withTimeout(
+    normalizeAudio({ inputPath: filePath, outputPath: normPath, signal }),
+    TRANSCRIBE_TIMEOUT_MS,
+    "audio normalize",
+  );
 
-  const segments = await transcribeAudio({ filePath: normPath, signal });
+  const segments = await withTimeout(
+    transcribeAudio({ filePath: normPath, signal }),
+    TRANSCRIBE_TIMEOUT_MS,
+    "transcription",
+  );
   if (!segments || segments.length === 0) return null;
   const text = segments.map((s) => s.text).join(" ").replace(/\s+/g, " ").trim();
   return text.length > 0 ? text : null;
@@ -199,8 +267,19 @@ export async function extractMaterials(
   const perFile: MaterialFileResult[] = [];
   const imageBlocks: MaterialImageBlock[] = [];
   const chunks: string[] = [];
-  const workDir = opts.workDir || tmpScratchDir();
+  // Scratch dir is created LAZILY · the text/doc/image-only path never
+  // touches the filesystem beyond reading the uploads. Only when an
+  // audio/video file is actually transcoded do we mint a dir, and we
+  // clean it up in the finally below. A caller-supplied workDir is owned
+  // by the caller and is NEVER removed here.
+  let ownScratchDir: string | null = null;
+  const resolveWorkDir = (): string => {
+    if (opts.workDir) return opts.workDir;
+    if (!ownScratchDir) ownScratchDir = tmpScratchDir();
+    return ownScratchDir;
+  };
 
+  try {
   for (const m of materials) {
     if (opts.signal?.aborted) {
       perFile.push({ name: m.name, kind: m.kind, status: "noted" });
@@ -240,8 +319,9 @@ export async function extractMaterials(
           perFile.push({ name: m.name, kind: m.kind, status: "noted" });
         }
       } else {
-        // audio / video → transcribe (best-effort).
-        const transcript = await extractTranscript(m.filePath, workDir, opts.signal);
+        // audio / video → transcribe (best-effort). The scratch dir is
+        // minted here on first use only.
+        const transcript = await extractTranscript(m.filePath, resolveWorkDir(), opts.signal);
         if (transcript) {
           const clipped = transcript.slice(0, PER_FILE_TEXT_CAP);
           chunks.push(labelChunk(`${m.name} (transcript)`, clipped));
@@ -257,6 +337,13 @@ export async function extractMaterials(
       );
       chunks.push(`[${m.kind} attached: ${m.name} · could not be read]`);
       perFile.push({ name: m.name, kind: m.kind, status: "noted" });
+    }
+  }
+  } finally {
+    // Remove the scratch dir we minted (transcoded MP3s + temp audio).
+    // A caller-supplied workDir is left untouched. Best-effort.
+    if (ownScratchDir) {
+      try { rmSync(ownScratchDir, { recursive: true, force: true }); } catch { /* best-effort */ }
     }
   }
 

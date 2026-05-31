@@ -28,6 +28,7 @@ vi.mock("../src/skills/ffmpeg.js", () => ({
 import {
   extractMaterials,
   MATERIALS_CONTEXT_CAP,
+  MAX_TEXT_BYTES,
   type MaterialDescriptor,
 } from "../src/orchestrator/persona-materials.js";
 import { getActiveVoiceProvider } from "../src/storage/voice-credentials.js";
@@ -95,6 +96,17 @@ describe("extractMaterials · text", () => {
     const res = await extractMaterials([m], { workDir: dir });
     expect(res.perFile[0]).toMatchObject({ status: "noted" });
     expect(res.materialsContext).toContain("could not be read");
+  });
+
+  it("degrades an oversized text file to a noted entry (raw-size ceiling)", async () => {
+    // A file above MAX_TEXT_BYTES must be rejected BEFORE being read
+    // whole — it degrades to a noted entry, never folded into context.
+    const huge = "y".repeat(MAX_TEXT_BYTES + 1024);
+    const m = material("huge.txt", "text", huge);
+    const res = await extractMaterials([m], { workDir: dir });
+    expect(res.perFile[0]).toMatchObject({ name: "huge.txt", status: "noted" });
+    expect(res.materialsContext).toContain("could not be read");
+    expect(res.materialsContext).not.toContain("yyyy");
   });
 
   it("caps the consolidated context at MATERIALS_CONTEXT_CAP", async () => {
